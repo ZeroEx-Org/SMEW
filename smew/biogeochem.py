@@ -354,28 +354,42 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     printcounter = 0
     numb_print = 0
     
-    for i in range(1, len(s)): 
+    for i in range(1, len(s)):
+            
+        last = i-1
+
+        if temp_soil[i]>0:
+
+            # Modified by ZeroEx to shut down model at below zero temperatures and continue at last value above zero 
+            if i < len(s)-1:
+                if temp_soil[i+1] < 0: # if the next value is below zero
+                    idx_before_freezing = i # remember index to continue from there after freezing period
+
+            if temp_soil[i-1]<0: # If last value was during freezing period
+                last = idx_before_freezing-1 # use last index before freezing
+            else:
+                last = i-1
         
             #CO2 advection due to moisture variation    
-            if s[i]<s[i-1]:
-                ADV[i] = n*Zr*1000*(s[i]-s[i-1])*CO2_atm # [mol] 
-            elif s[i]>s[i-1]:
-                ADV[i] = n*Zr*1000*(s[i]-s[i-1])*CO2_air[i-1]
+            if s[i]<s[last]:
+                ADV[i] = n*Zr*1000*(s[i]-s[last])*CO2_atm # [mol] 
+            elif s[i]>s[last]:
+                ADV[i] = n*Zr*1000*(s[i]-s[last])*CO2_air[last]
             
             #active uptake [Ca, Mg, K, Si] 
-            UP_act = smew.up_act(v[i], (v[i]-v[i-1]), xi, dt, T[i-1], Ca[i-1], Mg[i-1], K[i-1], Si[i-1], Dw[i-1], Zr, k_v, RAI, root_d)
-            UP_Ca[i-1], UP_Mg[i-1], UP_K[i-1], UP_Si[i-1] = UP_act # [mol-conv/d] 
+            UP_act = smew.up_act(v[i], (v[i]-v[last]), xi, dt, T[last], Ca[last], Mg[last], K[last], Si[last], Dw[last], Zr, k_v, RAI, root_d)
+            UP_Ca[last], UP_Mg[last], UP_K[last], UP_Si[last] = UP_act # [mol-conv/d] 
                                   
             #explicit mass balances # [mol]
-            Ca_tot[i] = Ca_tot[i-1]+(I_Ca+np.sum(min_st[:,0]*EW[:,i-1])+W_CaCO3[i-1]-(L[i-1]+T[i-1])*1000*Ca[i-1]-UP_Ca[i-1])*dt 
-            Mg_tot[i] = Mg_tot[i-1]+(I_Mg+np.sum(min_st[:,1]*EW[:,i-1])+W_MgCO3[i-1]-(L[i-1]+T[i-1])*1000*Mg[i-1]-UP_Mg[i-1])*dt
-            K_tot[i] = K_tot[i-1]+(I_K+np.sum(min_st[:,2]*EW[:,i-1])-(L[i-1]+T[i-1])*1000*K[i-1]-UP_K[i-1])*dt
-            Na_tot[i] = Na_tot[i-1]+(I_Na+np.sum(min_st[:,3]*EW[:,i-1])-(L[i-1]+T[i-1])*1000*Na[i-1])*dt
-            Al_tot[i] = Al_tot[i-1]+(np.sum(min_st[:,4]*EW[:,i-1])*conv_Al-L[i-1]*1000*(Al[i-1]+AlOH4[i-1]))*dt
-            Si_tot[i] = Si_tot[i-1]+(I_Si+np.sum(min_st[:,5]*EW[:,i-1])-(L[i-1]+T[i-1])*1000*Si[i-1]-UP_Si[i-1])*dt
-            An_tot[i] = An_tot[i-1]+(I_An - (L[i-1]+T[i-1])*An[i-1]*1000)*dt # [mol_c]
+            Ca_tot[i] = Ca_tot[last]+(I_Ca+np.sum(min_st[:,0]*EW[:,last])+W_CaCO3[last]-(L[last]+T[last])*1000*Ca[last]-UP_Ca[last])*dt 
+            Mg_tot[i] = Mg_tot[last]+(I_Mg+np.sum(min_st[:,1]*EW[:,last])+W_MgCO3[last]-(L[last]+T[last])*1000*Mg[last]-UP_Mg[last])*dt
+            K_tot[i] = K_tot[last]+(I_K+np.sum(min_st[:,2]*EW[:,last])-(L[last]+T[last])*1000*K[last]-UP_K[last])*dt
+            Na_tot[i] = Na_tot[last]+(I_Na+np.sum(min_st[:,3]*EW[:,last])-(L[last]+T[last])*1000*Na[last])*dt
+            Al_tot[i] = Al_tot[last]+(np.sum(min_st[:,4]*EW[:,last])*conv_Al-L[last]*1000*(Al[last]+AlOH4[last]))*dt
+            Si_tot[i] = Si_tot[last]+(I_Si+np.sum(min_st[:,5]*EW[:,last])-(L[last]+T[last])*1000*Si[last]-UP_Si[last])*dt
+            An_tot[i] = An_tot[last]+(I_An - (L[last]+T[last])*An[last]*1000)*dt # [mol_c]
             Alk_tot[i] = 2*Mg_tot[i]+2*Ca_tot[i]+Na_tot[i]+K_tot[i]-An_tot[i] # [mol_c]
-            IC_tot[i] = IC_tot[i-1]+I[i]*1000*DIC_rain[i]-ADV[i]+(W_CaCO3[i-1]+W_MgCO3[i-1]+r_het[i-1]+r_aut[i-1]-Fs[i-1]-L[i-1]*1000*DIC[i-1])*dt 
+            IC_tot[i] = IC_tot[last]+I[i]*1000*DIC_rain[i]-ADV[i]+(W_CaCO3[last]+W_MgCO3[last]+r_het[last]+r_aut[last]-Fs[last]-L[last]*1000*DIC[last])*dt 
                        
             #implicit system
             def equations(p):
@@ -386,30 +400,30 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                 )
                        
             #initial guess
-            Alk0 = (Alk_tot[i]-R_alk[i-1])/(n*Zr*s[i]*1000)
-            CO2_w0 = IC_tot[i]/(n*Zr*1000)*1/(s[i]*(1+k1[i]/H[i-1]+k2[i]*k1[i]/(H[i-1]**2))+(1-s[i])/k_H[i]) 
-            R_alk0 = R_alk[i-1]
-            Al_w0 = (Al_tot[i]-(f_Al[i-1]/3)*CEC_tot*conv_Al)/(n*Zr*s[i]*1000)#s[i-1]*Al_w[i-1]/s[i]
-            Al0 = (H[i-1]**4/(H[i-1]**4+H[i-1]**3*K1+H[i-1]**2*K1*K2+H[i-1]*K1*K2*K3+K1*K2*K3*K4))*Al_w0
-            Mg0 = (Mg_tot[i]-f_Mg[i-1]/2*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*Mg[i-1]/s[i] 
-            Na0 = (Na_tot[i]-f_Na[i-1]*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*Na[i-1]/s[i] 
-            Ca0 = (Ca_tot[i]-f_Ca[i-1]/2*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*Ca[i-1]/s[i]
-            K0 =  (K_tot[i]-f_K[i-1]*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*K[i-1]/s[i]
-            H0 = H[i-1]
+            Alk0 = (Alk_tot[i]-R_alk[last])/(n*Zr*s[i]*1000)
+            CO2_w0 = IC_tot[i]/(n*Zr*1000)*1/(s[i]*(1+k1[i]/H[last]+k2[i]*k1[i]/(H[last]**2))+(1-s[i])/k_H[i]) 
+            R_alk0 = R_alk[last]
+            Al_w0 = (Al_tot[i]-(f_Al[last]/3)*CEC_tot*conv_Al)/(n*Zr*s[i]*1000)#s[i-1]*Al_w[i-1]/s[i]
+            Al0 = (H[last]**4/(H[last]**4+H[last]**3*K1+H[last]**2*K1*K2+H[last]*K1*K2*K3+K1*K2*K3*K4))*Al_w0
+            Mg0 = (Mg_tot[i]-f_Mg[last]/2*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*Mg[i-1]/s[i] 
+            Na0 = (Na_tot[i]-f_Na[last]*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*Na[i-1]/s[i] 
+            Ca0 = (Ca_tot[i]-f_Ca[last]/2*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*Ca[i-1]/s[i]
+            K0 =  (K_tot[i]-f_K[last]*CEC_tot)/(n*Zr*s[i]*1000) #s[i-1]*K[i-1]/s[i]
+            H0 = H[last]
             def eqH(p):
                     # H0 = p
                     return _eqH_numba(p, k1[i], k2[i], CO2_w0, k_w[i], Alk0)
-            H0_2 =fsolve(eqH, H[i-1])[0]
+            H0_2 =fsolve(eqH, H[last])[0]
             
             #solution 1
-            x0 = np.array([Alk0, CO2_w0, H0, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0, f_Al[i-1],f_Mg[i-1], f_Na[i-1], f_K[i-1], f_H[i-1], f_Ca[i-1]])         
+            x0 = np.array([Alk0, CO2_w0, H0, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0, f_Al[last],f_Mg[last], f_Na[last], f_K[last], f_H[last], f_Ca[last]])         
             sol = fsolve(equations,x0, xtol=1e-12)                                           
             errors[:,i] = equations(sol) #residuals
             
             #solution 2
             res_threshold = 1e-1
             if np.any(abs(errors[:,i]) > res_threshold):
-                x0 = np.array([Alk0, CO2_w0, H0_2, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0, f_Al[i-1],f_Mg[i-1], f_Na[i-1], f_K[i-1], f_H[i-1], f_Ca[i-1]])
+                x0 = np.array([Alk0, CO2_w0, H0_2, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0, f_Al[last],f_Mg[last], f_Na[last], f_K[last], f_H[last], f_Ca[last]])
                 sol = fsolve(equations, x0, xtol=1e-14)
                 errors[:,i] = equations(sol)
                 if np.any(abs(errors[:,i]) > res_threshold):
@@ -437,8 +451,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
             Fs[i] = D[i]/(Z_CO2)*(CO2_air[i]-CO2_atm)*1000 # [mol/d]    
             
             #Carbonate minerals
-            CaCO3[i] = CaCO3[i-1] - W_CaCO3[i-1]*dt # [mol-conv]
-            MgCO3[i] = MgCO3[i-1] - W_MgCO3[i-1]*dt
+            CaCO3[i] = CaCO3[last] - W_CaCO3[last]*dt # [mol-conv]
+            MgCO3[i] = MgCO3[last] - W_MgCO3[last]*dt
             
             #Carbonate weathering
             Omega_CaCO3[i] = Ca[i]*CO3[i]/K_CaCO3 # [-]
@@ -457,18 +471,18 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                 if i> tt_app:
                     
                     #mineral fractions in rock
-                    M_min[:,i] = M_min[:,i-1]-EW[:,i-1]*MM_min[:]*dt # [g]
+                    M_min[:,i] = M_min[:,last]-EW[:,last]*MM_min[:]*dt # [g]
                     M_min[:, i] = np.maximum(M_min[:, i], 0)
                     M_rock[i] = np.sum(M_min[:,i]) + M_iner # [g]
                     if M_rock[i]>0:
                         rock_f[:,i] = M_min[:,i]/M_rock[i] # [-]
                         
                     #diameter variation
-                    d_shrink = np.sum(rock_f[:,i-1]*Wr[:,i-1]*MM_min[:]/rho_rock)*dt # [m]
-                    d[:,i] = d[:,i-1] - 2*d_shrink*lamb[:,i-1] # [m]
+                    d_shrink = np.sum(rock_f[:,last]*Wr[:,last]*MM_min[:]/rho_rock)*dt # [m]
+                    d[:,i] = d[:,last] - 2*d_shrink*lamb[:,last] # [m]
                     d[:,i][d[:,i] < 0] = 0
                     delta_d[:,i] = np.insert(np.diff(d[:,i]),0,d[0,i]) # [m]                
-                    [lamb[:,i], SSA[:,i], psd[:,i], SA[i]] = smew.psd_evol(d[:,i], delta_d[:,i], d[:,i-1], delta_d[:,i-1], psd[:,i-1], n_d_cl, a, b, rho_rock)
+                    [lamb[:,i], SSA[:,i], psd[:,i], SA[i]] = smew.psd_evol(d[:,i], delta_d[:,i], d[:,last], delta_d[:,last], psd[:,last], n_d_cl, a, b, rho_rock)
                  
                 #weathering fluxes         
                 EW[:,i] = Wr[:,i]*SA[i]*rock_f[:,i] # [mol/d]
