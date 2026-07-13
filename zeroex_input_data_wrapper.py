@@ -300,7 +300,7 @@ def create_plots(project_name, model_results):
     # Alk
     ax2 = axs2.twinx()
     color = 'navy'
-    ax2.set_ylabel('[Alk] ($\mu$mol/l)', color=color)
+    ax2.set_ylabel(r'[Alk] ($\mu$mol/l)', color=color)
     ax2.plot(model_results['t'], model_results['Alk'], color=color)
     ax2.tick_params(axis='y', labelcolor=color)
     #axs2.set_xticklabels([])
@@ -313,7 +313,7 @@ def create_plots(project_name, model_results):
 
     cumulative_sum = 0
     i = 0
-    labels = ['[CO$_3^{2-}$]',  '[HCO$_3^{-}$]', '[CO$_2]_\mathrm{w}$', '[CO$_2]_\mathrm{a}$']
+    labels = [r'[CO$_3^{2-}$]',  r'[HCO$_3^{-}$]', r'[CO$_2]_\mathrm{w}$', r'[CO$_2]_\mathrm{a}$']
     colors = ['darkgreen', 'navy', 'grey', 'darkorange']
     for element in ['CO3', 'HCO3', 'CO2_w', 'CO2_air']:
         axs3.plot(model_results['t'], model_results[element] + cumulative_sum, label=labels[i], color = colors[i])
@@ -321,7 +321,7 @@ def create_plots(project_name, model_results):
         i = i + 1
         cumulative_sum += model_results[element]
         
-    axs3.set_ylabel('$\mu$mol/l')
+    axs3.set_ylabel(r'$\mu$mol/l')
     axs3.set_xlabel('t(d)')
     #axs3.set_xticklabels([])
     axs3.yaxis.tick_right()

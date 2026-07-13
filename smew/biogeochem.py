@@ -6,6 +6,7 @@ Created on Mon Dec 16 14:34:44 2019
 
 import numpy as np
 import smew
+from smew import weathering_kinec
 from numba import njit
 from scipy.optimize import fsolve
 #minimize, least_squares, newton_krylov, broyden1, root, broyden2
@@ -51,7 +52,11 @@ def _biogeochem_equations_numba(
     )
 
 def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add):
-            
+    '''
+    !!! Fe not modeled !!! -> set to zero to make the model run!!
+    '''
+    Fe=0
+         
     # Preallocating the variables
     pH = np.zeros(len(s))
     H = np.zeros(len(s))
@@ -198,11 +203,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     #mineral constants
     if M_rock_in > 0: 
         for j in range(0,number_min):
-            MM_min[j], k_diss_H[j], k_diss_w[j], k_diss_OH[j], n_H[j], n_OH[j], E_H[j], E_w[j], E_OH[j], min_st[j,:], K_sp[j] = smew.min_const(mineral[j], conv_mol)
-            #temperature scaling
-            k_H_T[j,:] = k_diss_H[j]*np.exp(-E_H[j]*1000/(8.314/conv_mol)*(1/T_K[:]-1/(25+273.15)))
-            k_w_T[j,:] = k_diss_w[j]*np.exp(-E_w[j]*1000/(8.314/conv_mol)*(1/T_K[:]-1/(25+273.15)))
-            k_OH_T[j,:] = k_diss_OH[j]*np.exp(-E_OH[j]*1000/(8.314/conv_mol)*(1/T_K[:]-1/(25+273.15)))
+            MM_min[j], min_st[j,:] = smew.min_const(mineral[j],conv_mol)
+
     
     #rock density
     rho_rock = 3*1e6 # [g/m3]
@@ -342,11 +344,12 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         #mineral weathering
         if t_app == 0:
             for j in range(0, number_min):
-                Omega[j,0] = smew.sil_Omega(mineral[j], Ca[0], Mg[0], K[0], Na[0], Al[0], AlOH4[0], Si[0], H[0], K_sp[j], conv_mol,conv_Al) #[-]
-                #weathering rate [mol-conv/ m2 d]                
-                Wr[j,0]= smew.sil_Wr(mineral[j], Omega[j,0], s[0], H[0], k_H_T[j,0], k_w_T[j,0],k_OH_T[j,0], n_H[j], n_OH[j], diss_f,  conv_mol) 
-                #weathering flux [mol-conv/d] 
-                EW[j,0] = Wr[j,0]*SA[0]*rock_f[j,0]
+                Omega[j,0] = weathering_kinec.Omega_sil(mineral[j], Ca[0], Mg[0], K[0], Na[0], Si[0], H[0], Al[0], Fe, K_sp[j], conv_mol, conv_Al) #[-]
+                #Wr[j,0] = s[0]*diss_f*(k_diss_H_t[j,0]*(H[0]/conv_mol)**n_H[j]+k_diss_w_t[j,0]+k_diss_OH_t[j,0]*(H[0]/conv_mol)**n_OH[j])*(1-Omega[j,0]) # [mol-conv/ m2 d]
+                #EW[j,0] = Wr[j,0]*SA[0]*rock_f[j,0] # [mol-conv/d]
+                #print(mineral[j], T_K[0], Omega[j,0], SA[0]*rock_f[j,0],H[0],Al[0])
+                Wr[j,0] = s[0]*diss_f*weathering_kinec.mineral_weathering(mineral[j], T_K[0], Omega[j,0], H[0], Al[0], conv_mol, conv_Al) # mineral, Tk, Omega, H, Al, conv_mol, conv_Al
+                EW[j,0] = Wr[j,0]*SA[0]*rock_f[j,0] # [mol-conv/d]
                 
 #------------------------------------------------------------------------------
     #SYSTEM RESOLUTION
@@ -464,8 +467,13 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                 
                 #saturation and weathering rate
                 for j in range(0, number_min):
-                    Omega[j,i] = smew.sil_Omega(mineral[j], Ca[i], Mg[i], K[i], Na[i], Al[i], AlOH4[i], Si[i], H[i], K_sp[j], conv_mol,conv_Al) #[-]           
-                    Wr[j,i]= smew.sil_Wr(mineral[j], Omega[j,i], s[i], H[i], k_H_T[j,i], k_w_T[j,i],k_OH_T[j,i], n_H[j], n_OH[j], diss_f,  conv_mol) 
+                    #Omega[j,i] = smew.sil_Omega(mineral[j], Ca[i], Mg[i], K[i], Na[i], Al[i], AlOH4[i], Si[i], H[i], K_sp[j], conv_mol,conv_Al) #[-]           
+                    #Wr[j,i]= smew.sil_Wr(mineral[j], Omega[j,i], s[i], H[i], k_H_T[j,i], k_w_T[j,i],k_OH_T[j,i], n_H[j], n_OH[j], diss_f,  conv_mol) 
+                    
+                    # ZeroEx version
+                    Omega[j,i] = weathering_kinec.Omega_sil(mineral[j], Ca[i], Mg[i], K[i], Na[i], Si[i], H[i], Al[0], Fe, K_sp[j], conv_mol, conv_Al) #[-]
+                    Wr[j,i] = s[i]*diss_f*weathering_kinec.mineral_weathering(mineral[j], T_K[i], Omega[j,i], H[i], Al[i], conv_mol, conv_Al)
+                    #EW[j,i] = Wr[j,i]*SA[i]*rock_f[j,i] # [mol-conv/d]
 
                 #post application only
                 if i> tt_app:
