@@ -69,8 +69,8 @@ def read_input_data(project_name, value_col):
 
     input_data = {}
 
-    project_path = os.getcwd()+os.sep+'Projects'+os.sep+project_name
-    input_file_name = project_path+os.sep+'Data_Sheet_'+project_name+'.xlsx'
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    input_file_name = repo_root / 'Projects' / project_name / f'Data_Sheet_{project_name}.xlsx'
 
     # Read single value inputs
     climate_inputs = pd.read_excel(input_file_name,sheet_name='Climatic',usecols=['Parameter',value_col])
@@ -250,7 +250,8 @@ def create_plots(project_name, model_results):
     print('--------------------------------------------------------------------------------------')
     print('Plotting outputs for',project_name,'...')
 
-    project_path = os.getcwd()+os.sep+'Projects'+os.sep+project_name
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    project_path = repo_root / 'Projects' / project_name
 
     # Create a figure and subplots
     fig = plt.figure(figsize=(12,15))
@@ -440,7 +441,7 @@ def create_plots(project_name, model_results):
 
     #plotting
     plt.tight_layout(pad=0.2)
-    plt.savefig(project_path+os.sep+'out.png',dpi=300)
+    plt.savefig(project_path / 'out.png', dpi=300)
 
 
     # ----------------------------------------------------------------------------------------------------------------------------
