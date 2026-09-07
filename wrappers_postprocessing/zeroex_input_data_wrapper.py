@@ -160,7 +160,8 @@ def run_SMEW(project_name, input_data):
 
     #stochastic rain with seasonality [m] (only works with multi-year)
     alfa_rain = data_in.alfa_rain*10**(-3) # Convert from mm to m
-    rain = smew.rain_stoc_season(data_in.lambda_rain, alfa_rain, t_end, dt)
+    # day1 must be passed so the monthly lambda/alfa align with the start month
+    rain = smew.rain_stoc_season(data_in.lambda_rain, alfa_rain, t_end, dt, data_in.day1)
 
     #vegetation [g/m2]
     v_in = 0
