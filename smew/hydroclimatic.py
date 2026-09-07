@@ -86,8 +86,11 @@ def rain_stoc(lamda, alfa, t_end, dt, seed = None):
     #                 independent of any other random call elsewhere in the program
     rng = None if seed is None else np.random.default_rng(seed)
     
-    # simulated event number
-    nb_ev = int(2*lamda*t_end) 
+    # simulated event number. 2x the expected count (lamda*t_end) is a buffer for the
+    # Poisson spread in the realized count; the +10 protects short runs, where the plain
+    # 2x buffer is exhausted often enough to matter (lamda*t_end ~ 8 -> ~1% of
+    # realizations) and the series was then silently truncated before t_end.
+    nb_ev = int(2*lamda*t_end) + 10
     
     # interarrival time [d]
     tau = scipy.stats.expon.rvs(scale = 1/lamda, loc = 0, size = int(nb_ev), random_state = rng)
@@ -97,11 +100,20 @@ def rain_stoc(lamda, alfa, t_end, dt, seed = None):
 
     # rainfall [m]
     rain = np.zeros(int(t_end/dt))
-    t_event = 1 #initialization
+    t_event = 0. # storm arrival time [d], accumulated in continuous time
     for i in range(0, nb_ev):
-        t_event = int(t_event+tau[i]/dt)
-        if t_event<=len(rain):
-            rain[t_event] = h[i]
+        # accumulate the arrival time in days and snap to the grid once, at the end.
+        # Snapping inside the running sum (t_event = int(t_event + tau/dt)) truncated
+        # up to one timestep off every interarrival time, which compressed the storm
+        # sequence by ~dt/2 per event and made the annual total depend on dt.
+        t_event = t_event + tau[i]
+        idx = int(t_event/dt)
+        if idx < len(rain): # strict '<': idx == len(rain) indexed one past the end
+            # '+=', not '=': two storms falling in the same timestep must add. With '='
+            # the earlier one was silently overwritten and its depth lost -- common at
+            # coarse dt, and the second reason the annual total drifted with dt (it
+            # pulled the total down while the truncation above pulled it up).
+            rain[idx] += h[i]
         else:
             break
                 
@@ -111,20 +123,39 @@ def rain_stoc(lamda, alfa, t_end, dt, seed = None):
 #--------------------------------------------------------------------------------------------------
 # stochastic rain with seasonality 
 
-def rain_stoc_season(lamda, alfa, t_end, dt, seed = None):
+def rain_stoc_season(lamda, alfa, t_end, dt, day1, seed = None):
     
+    # lamda and alfa are 12-element arrays, one entry per month.
+    # day1 = first day of the simulation, required and positional exactly as in temp()
+    # and ET0(). Deliberately given no default: a default of 1 (January) is correct for
+    # one site only, and a caller that forgot it would silently get the wrong season
+    # rather than a TypeError.
     # see rain_stoc for the meaning of seed. One generator is shared across all
     # months/years, so the whole multi-year series is reproducible as a unit.
     rng = None if seed is None else np.random.default_rng(seed)
     
     days = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) # month days
-    rain = np.array
+    
+    # lamda/alfa are indexed January..December, but a simulation can start in any
+    # month. Rotate all three arrays so that index 0 is the month containing day1.
+    # Without this the first month of the run always drew January's rain statistics:
+    # a run starting in October (day1 = 291, as in Projects/Vulkaneifel) got the whole
+    # seasonal cycle shifted by nine months relative to its temperature and ET0.
+    # Whole months only -- the run is taken to begin on the 1st of that month.
+    month0 = int(np.searchsorted(np.cumsum(days), (day1 - 1) % 365 + 1))
+    days  = np.roll(days, -month0)
+    lamda = np.roll(np.asarray(lamda, dtype = float), -month0)
+    alfa  = np.roll(np.asarray(alfa,  dtype = float), -month0)
+    
+    # note: only whole years are generated (int(t_end/365)), so a t_end that is not a
+    # multiple of 365 d returns a rain array shorter than np.arange(0, t_end, dt).
+    rain = np.array([]) # np.array() with no argument raises TypeError
 
     for j in range(0, int(t_end/365)):#year
         for i in range(0, len(days)):#month
             
-            # simulated rainfall events per month
-            nb_ev = int(2*lamda[i]*days[i]) 
+            # simulated rainfall events per month (see rain_stoc for the +10 buffer)
+            nb_ev = int(2*lamda[i]*days[i]) + 10
     
             # interarrival time [d]
             tau = scipy.stats.expon.rvs(scale = 1/lamda[i], loc = 0, size = int(nb_ev), random_state = rng)
@@ -134,13 +165,13 @@ def rain_stoc_season(lamda, alfa, t_end, dt, seed = None):
 
             # rainfall array [m]
             rain_month = np.zeros(int(days[i]/dt))
-            t_event = 1 #initialization
+            t_event = 0. # storm arrival time [d] within the month, continuous
             for ii in range(0, nb_ev):
-                t_event = int(t_event+tau[ii]/dt)
-                if t_event<(days[i]/dt):
-                    rain_month[t_event] = h[ii]
-            if i == 0 and j == 0:
-                rain = rain_month
-            else:
-                rain = np.append(rain, rain_month)
+                t_event = t_event + tau[ii] # accumulate in days, snap to the grid once
+                idx = int(t_event/dt)
+                if idx < len(rain_month):
+                    rain_month[idx] += h[ii] # '+=' so coincident storms add, not overwrite
+                else:
+                    break # t_event is monotonic, so every later draw is past month end
+            rain = np.append(rain, rain_month)
     return rain
