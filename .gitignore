@@ -28,3 +28,8 @@ Thumbs.db
 
 # –– doc files –––
 docs/
+
+# --- images --- avoid committing large images
+*.png
+*.jpg
+*.jpeg

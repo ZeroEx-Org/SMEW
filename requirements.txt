@@ -4,3 +4,4 @@ scipy
 dill
 matplotlib
 numba
+openpyxl
