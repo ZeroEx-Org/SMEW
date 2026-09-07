@@ -79,16 +79,21 @@ def ET0(latitude,altitude,temp_air,temp_soil,temp_min,temp_max, wind,albedo,Zr,c
 #--------------------------------------------------------------------------------------------------
 # stochastic rain 
 
-def rain_stoc(lamda, alfa, t_end, dt):
+def rain_stoc(lamda, alfa, t_end, dt, seed = None):
+    
+    # seed = None  -> draws from numpy's global random state, series differs every call (legacy behaviour)
+    # seed = <int> -> draws from a local generator, series is bit-for-bit reproducible and
+    #                 independent of any other random call elsewhere in the program
+    rng = None if seed is None else np.random.default_rng(seed)
     
     # simulated event number
     nb_ev = int(2*lamda*t_end) 
     
     # interarrival time [d]
-    tau = scipy.stats.expon.rvs(scale = 1/lamda, loc = 0, size = int(nb_ev))
+    tau = scipy.stats.expon.rvs(scale = 1/lamda, loc = 0, size = int(nb_ev), random_state = rng)
 
     # intensity [m]
-    h = scipy.stats.expon.rvs(scale = alfa, loc = 0, size = int(nb_ev))
+    h = scipy.stats.expon.rvs(scale = alfa, loc = 0, size = int(nb_ev), random_state = rng)
 
     # rainfall [m]
     rain = np.zeros(int(t_end/dt))
@@ -106,7 +111,11 @@ def rain_stoc(lamda, alfa, t_end, dt):
 #--------------------------------------------------------------------------------------------------
 # stochastic rain with seasonality 
 
-def rain_stoc_season(lamda, alfa, t_end, dt):
+def rain_stoc_season(lamda, alfa, t_end, dt, seed = None):
+    
+    # see rain_stoc for the meaning of seed. One generator is shared across all
+    # months/years, so the whole multi-year series is reproducible as a unit.
+    rng = None if seed is None else np.random.default_rng(seed)
     
     days = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) # month days
     rain = np.array
@@ -118,10 +127,10 @@ def rain_stoc_season(lamda, alfa, t_end, dt):
             nb_ev = int(2*lamda[i]*days[i]) 
     
             # interarrival time [d]
-            tau = scipy.stats.expon.rvs(scale = 1/lamda[i], loc = 0, size = int(nb_ev))
+            tau = scipy.stats.expon.rvs(scale = 1/lamda[i], loc = 0, size = int(nb_ev), random_state = rng)
 
             # intensity [m]
-            h = scipy.stats.expon.rvs(scale = alfa[i], loc = 0, size = int(nb_ev))
+            h = scipy.stats.expon.rvs(scale = alfa[i], loc = 0, size = int(nb_ev), random_state = rng)
 
             # rainfall array [m]
             rain_month = np.zeros(int(days[i]/dt))
