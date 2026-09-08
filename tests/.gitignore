@@ -1,0 +1,4 @@
+# scratch .npz written by the demo/sweep scripts -- never commit these.
+# tests/golden/*.npz are the real fixtures and ARE tracked.
+_*.npz
+*.sweep.npz

@@ -59,20 +59,24 @@ for k, v in data.items():
 print("   composition:", dict(sorted(kinds.items(), key=lambda x: -x[1])))
 
 print("\n   (a) can you just np.savez the whole dict?")
+# try/finally: np.savez can raise partway through and leave a large temp file
+# behind (it did, and `git add -A` then committed 9.7 MB of it).
+tmp = os.path.join(HERE, "_x.npz")
 try:
-    np.savez(os.path.join(HERE, "_x.npz"), **data)
-    sz = os.path.getsize(os.path.join(HERE, "_x.npz"))
-    print(f"       it writes ({sz/1e6:.1f} MB) but see below")
+    np.savez(tmp, **data)
+    print(f"       it writes ({os.path.getsize(tmp)/1e6:.1f} MB) but see below")
     try:
-        np.load(os.path.join(HERE, "_x.npz"), allow_pickle=False)["mineral"]
+        np.load(tmp, allow_pickle=False)["mineral"]
         print("       reload of 'mineral' with allow_pickle=False: ok")
     except ValueError as e:
         print(f"       reload FAILS with allow_pickle=False: {str(e)[:72]}...")
         print("       -> object arrays need pickle; pickled fixtures are not safe to")
         print("          load from a repo and are not reproducible across numpy versions")
-    os.remove(os.path.join(HERE, "_x.npz"))
 except Exception as e:
     print(f"       raises {type(e).__name__}: {str(e)[:60]}")
+finally:
+    if os.path.exists(tmp):
+        os.remove(tmp)
 
 print("\n   (b) the freezing interpolation -- the difference that matters most")
 WRAP = ['pH', 'Alk', 'M_rock', 'f_Ca', 'f_Mg', 'f_K', 'f_Na', 'f_H', 'f_Al',
