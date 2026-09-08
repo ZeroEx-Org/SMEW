@@ -10,4 +10,6 @@ demo_npz.py
 demo_open_npz.py
 dev.ipynb
 
-# tests/golden/*.npz are NOT ignored -- they are the regression fixtures.
+# tests/golden/*.npz are NOT ignored -- they are the regression fixtures, and
+# freeze_cases.py is tracked because the fixtures cannot be regenerated without it.
+!freeze_cases.py

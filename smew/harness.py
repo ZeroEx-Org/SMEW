@@ -39,6 +39,52 @@ SCHEMA = SCHEMA_1D + SCHEMA_2D
 AGGS = {"min": np.min, "max": np.max, "mean": np.mean, "sum": np.sum}
 
 
+def provenance():
+    """Which code state produced this payload. Recorded so a failing check can
+    say what it is diffing against, instead of just that something moved.
+
+    git is optional: if it is unavailable the fields come back as "unknown".
+    """
+    import datetime
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def git(*a):
+        try:
+            return subprocess.run(("git",) + a, cwd=here, capture_output=True,
+                                  text=True, timeout=10).stdout.strip() or "unknown"
+        except Exception:
+            return "unknown"
+
+    sha = git("rev-parse", "HEAD")
+    return {
+        "_git_sha": np.array([sha], dtype="U40"),
+        # dirty means the working tree differed from that commit, so the payload
+        # is NOT reproducible from the sha alone
+        # ":/smew" is a repo-root-relative pathspec: cwd here is the package
+        # directory, so a plain "smew" would resolve to smew/smew and match nothing
+        "_git_dirty": np.array([bool(git("status", "--porcelain", "--", ":/smew")
+                                     not in ("", "unknown"))]),
+        "_git_branch": np.array([git("rev-parse", "--abbrev-ref", "HEAD")], dtype="U64"),
+        "_created": np.array([datetime.datetime.now().isoformat(timespec="seconds")],
+                             dtype="U32"),
+        "_numpy": np.array([np.__version__], dtype="U16"),
+    }
+
+
+def describe(payload):
+    """One-line summary of where a payload came from."""
+    def g(k, d="?"):
+        v = payload.get(k)
+        return d if v is None else (v[0].item() if hasattr(v[0], "item") else v[0])
+    sha = str(g("_git_sha"))[:8]
+    dirty = " +dirty" if g("_git_dirty", False) else ""
+    kept = len(payload["t"]) if "t" in payload else "?"
+    full = g("_n_steps_full", "?")
+    return (f"{sha}{dirty} on {g('_git_branch')}, {kept} of {full} steps, "
+            f"created {g('_created')}, numpy {g('_numpy')}")
+
+
 def out_index(n_steps, n_out=None, stride=None, dt_out=None, dt=None):
     """Timestep indices to keep. Pass exactly one of n_out / stride / dt_out.
 
@@ -115,6 +161,7 @@ def collect(data, t, n_out=None, stride=None, dt_out=None, dt=None, extra=None):
             out[f"{k}__{name}"] = np.atleast_1d(np.asarray(fn(a, axis=axis), dtype=float))
         out[f"{k}__final"] = np.atleast_1d(np.asarray(a[..., -1], dtype=float))
 
+    out.update(provenance())
     out["_idx"] = idx
     out["_n_steps_full"] = np.array([n_steps])
     out["_schema"] = np.array(sorted(series), dtype="U32")
@@ -272,8 +319,13 @@ def main(argv=None):
     ap.add_argument("mode", choices=["freeze", "check", "sweep"])
     # this module lives in smew/, so the repo root is one level up. Goldens are
     # kept outside the package (tests/golden/) so they are not shipped on install.
+    # "harness_example", not "example": tests/golden/Example.npz is the fixture for
+    # Examples/Example.ipynb, and on a case-insensitive filesystem (macOS default)
+    # "example.npz" and "Example.npz" are the same file -- they silently overwrite
+    # each other. This one is harness.example_run(), which is seeded and therefore
+    # checkable; the notebook is not (it calls rain_stoc without a seed).
     ap.add_argument("--golden", default=os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "tests", "golden", "example.npz"))
+        os.path.abspath(__file__))), "tests", "golden", "harness_example.npz"))
     ap.add_argument("--n-out", type=int, default=500,
                     help="timesteps to keep in the .npz (size knob)")
     ap.add_argument("--dt-out", type=float, default=None,
@@ -311,12 +363,16 @@ def main(argv=None):
         sz = save(a.golden, payload, compress=not a.no_compress)
         print(f"froze {len(payload['t'])} of {len(t)} steps -> {a.golden} "
               f"({sz/1e3:.1f} kB)")
+        print(f"  {describe(payload)}")
         return 0
 
     if not os.path.exists(a.golden):
         print(f"no golden master at {a.golden}; run 'freeze' first")
         return 2
-    res = compare(load(a.golden), payload, rtol=a.rtol)
+    ref = load(a.golden)
+    print(f"baseline: {describe(ref)}")
+    print(f"current:  {describe(payload)}")
+    res = compare(ref, payload, rtol=a.rtol)
     print(report(res))
     return 0 if all(ok for _, _, ok in res) else 1
 
