@@ -53,7 +53,18 @@ def respiration(ADD, SOC_in, CO2_air_in, ratio_aut_het, soil, s, v, k_v, Zr, tem
             #Fs_in = k_dec/MM_C*(r*Zr*f_s[0]*f_T[0]*SOC[0]*(1 + ratio_aut_het * v / k_v)) # [mol-conv/m2] (resp_het + resp_aut = Fs)
         elif CO2_air_in is not None:
             Fs_in = (D[0]*1000/(Z_CO2))*(CO2_air_in - CO2_atm) # [mol-conv/m2] 
-            k_dec = MM_C*Fs_in/ (r*Zr*f_s[0]*f_T[0]*SOC[0]*(1 + ratio_aut_het * v[0] / k_v)) # [1/d] (resp_het + resp_aut = Fs)
+            # k_dec is an intrinsic soil constant, so it is calibrated against the
+            # time-mean f_T and f_s -- as the ADD and SOC inversions below already are.
+            # Against step 0 it inherited that step's weather: 8.8x spread in k_dec over
+            # the year for one site, and division by zero whenever the run began frozen
+            # (f_T[0] = 0) or below the hygroscopic point – dry state (f_s[0] = 0).
+            # v[0] is left instantaneous: the term is bounded in [1, 1+ratio_aut_het],
+            # so it cannot vanish and contributes little start-date sensitivity.
+            den = r*Zr*mean(f_T)*mean(f_s)*SOC[0]*(1 + ratio_aut_het * v[0] / k_v)
+            if den <= 0:
+                raise ValueError("Cannot calibrate k_dec: mean(f_T)*mean(f_s)*SOC[0] is zero "
+                                 "(soil frozen or below the hygroscopic point (dry state) for the whole run)")
+            k_dec = MM_C*Fs_in/den # [1/d] (resp_het + resp_aut = Fs)
 
     # ADD estimate for qs-equilibrium (in absence of data)
     if ADD is None and SOC[0] is not None:
