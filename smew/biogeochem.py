@@ -357,6 +357,12 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     printcounter = 0
     numb_print = 0
     
+    # fallback for a run that STARTS frozen: idx_before_freezing is only assigned at a
+    # thaw-to-freeze transition, but is read at every freeze-to-thaw one, so with no
+    # unfrozen step before the first frost it was read unbound (UnboundLocalError).
+    # 1 -> last = 0, i.e. resume from the initial conditions.
+    idx_before_freezing = 1
+    
     for i in range(1, len(s)):
             
         last = i-1
@@ -471,7 +477,13 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                     #Wr[j,i]= smew.sil_Wr(mineral[j], Omega[j,i], s[i], H[i], k_H_T[j,i], k_w_T[j,i],k_OH_T[j,i], n_H[j], n_OH[j], diss_f,  conv_mol) 
                     
                     # ZeroEx version
-                    Omega[j,i] = weathering_kinec.Omega_sil(mineral[j], Ca[i], Mg[i], K[i], Na[i], Si[i], H[i], Al[0], Fe, K_sp[j], conv_mol, conv_Al) #[-]
+                    # Al[i], not Al[0]: saturation must use the current aluminium, as every
+                    # other species here does (and as mineral_weathering below already did).
+                    # Caveat: there is no Al sink in the model (no gibbsite/kaolinite
+                    # precipitation), so dissolved Al accumulates unbounded and the solution
+                    # sits ~10-100x supersaturated. Al[0] used to mask that
+                    # in Omega (?); it is now visible. Needs a solubility control, not a frozen IC.
+                    Omega[j,i] = weathering_kinec.Omega_sil(mineral[j], Ca[i], Mg[i], K[i], Na[i], Si[i], H[i], Al[i], Fe, K_sp[j], conv_mol, conv_Al) #[-]
                     Wr[j,i] = s[i]*diss_f*weathering_kinec.mineral_weathering(mineral[j], T_K[i], Omega[j,i], H[i], Al[i], conv_mol, conv_Al)
                     #EW[j,i] = Wr[j,i]*SA[i]*rock_f[j,i] # [mol-conv/d]
 
