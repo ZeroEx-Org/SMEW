@@ -16,11 +16,11 @@ aggregates (min/max/mean/sum/final) computed on the FULL record before thinning.
 A perturbation that only shows up between two kept samples still moves the
 aggregates, so a 500-point golden master catches what a 52560-point one does.
 
-    import harness
+    from smew import harness
     payload = harness.collect(data, t, n_out=500)     # or dt_out=1.0, or stride=100
-    harness.save("golden/example.npz", payload)
-    ref, new = harness.load("golden/example.npz"), harness.collect(data2, t, n_out=500)
-    print(harness.report(harness.compare(ref, new)))
+    harness.save("tests/golden/example.npz", payload)
+    ref = harness.load("tests/golden/example.npz")
+    print(harness.report(harness.compare(ref, harness.collect(data2, t, n_out=500))))
 """
 import os
 import numpy as np
@@ -170,10 +170,10 @@ def report(results, show_pass=False):
 # ---------------------------------------------------------------------------
 # Example usage
 #
-#     python tests/harness.py freeze              # write the golden master
-#     python tests/harness.py check               # re-run and compare
-#     python tests/harness.py check --diss-f 1.00001   # prove it detects change
-#     python tests/harness.py sweep               # size/time vs n_out
+#     python -m smew.harness freeze              # write the golden master
+#     python -m smew.harness check               # re-run and compare
+#     python -m smew.harness check --diss-f 1.00001   # prove it detects change
+#     python -m smew.harness sweep               # size/time vs n_out
 #
 # example_run() below is the pattern to copy for a new case: declare the inputs,
 # wire the pipeline stages in order, return (data, t, extra).
@@ -270,8 +270,10 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("mode", choices=["freeze", "check", "sweep"])
-    ap.add_argument("--golden", default=os.path.join(os.path.dirname(
-        os.path.abspath(__file__)), "golden", "example.npz"))
+    # this module lives in smew/, so the repo root is one level up. Goldens are
+    # kept outside the package (tests/golden/) so they are not shipped on install.
+    ap.add_argument("--golden", default=os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tests", "golden", "example.npz"))
     ap.add_argument("--n-out", type=int, default=500,
                     help="timesteps to keep in the .npz (size knob)")
     ap.add_argument("--dt-out", type=float, default=None,
