@@ -226,7 +226,8 @@ def report(results, show_pass=False):
 # wire the pipeline stages in order, return (data, t, extra).
 # ---------------------------------------------------------------------------
 
-def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1):
+def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
+                with_water=False, temp_av=13):
     """One full SMEW pipeline with every input stated explicitly.
 
     Deterministic given seed: rain_stoc is the only stochastic stage.
@@ -246,7 +247,11 @@ def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1):
     s_in = 0.5                                    # initial relative moisture [-]
 
     # --- climate ---
-    temp_av, temp_ampl_yr, temp_ampl_d = 13, 11, 5      # [C]
+    # temp_av is a parameter so a caller can drive the run below freezing:
+    # biogeochem.py holds the chemistry through frost instead of integrating it
+    # (biogeochem.py:370-379), and no comparison notebook ever goes below zero,
+    # so that branch is otherwise never exercised.
+    temp_ampl_yr, temp_ampl_d = 11, 5                   # [C]
     albedo, coastal = 0.25, False
     wind = 1 * np.ones(len(t))                          # [m/s]
     R_tot, lamda = 1.2, 0.25                            # [m/yr], [1/d]
@@ -308,6 +313,13 @@ def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1):
     # series the notebooks plot that biogeochem_balance does not return
     extra = {"rain": rain, "s": s, "ET0": ET0, "SOC": SOC,
              "temp_soil": temp_soil, "L": L, "Q": Q, "v": v}
+    # bare evaporation is the one series biogeochem_balance never sees (it is not
+    # one of its arguments), and the water balance in smew.ledger needs it.
+    # Off by default so freeze/check payloads keep exactly the keys they had --
+    # compare() treats a key present in only one payload as a failure, so adding
+    # it unconditionally would invalidate every frozen file.
+    if with_water:
+        extra["E"] = E
     return data, t, extra
 
 
