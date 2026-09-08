@@ -9,14 +9,14 @@ import numpy as np
 import smew
 
 
-def run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1, mineral="forsterite"):
+def run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1, mineral="forsterite",
+        temp_av=13, temp_ampl_yr=11, latitude=40 * np.pi / 180, altitude=33):
     t = np.arange(0, t_end, dt)
     conv_mol, conv_Al = 1e6, 1e3
     soil, Zr, rho_bulk = "loam", 0.3, 1.2e6
-    latitude, altitude = 40 * np.pi / 180, 33
 
     temp_air, temp_soil, temp_min, temp_max = smew.temp(
-        latitude, 13, 11, 5, Zr, t_end, dt, day1)
+        latitude, temp_av, temp_ampl_yr, 5, Zr, t_end, dt, day1)
     ET0 = smew.ET0(latitude, altitude, temp_air, temp_soil, temp_min, temp_max,
                    np.ones(len(t)), 0.25, Zr, False, t_end, dt, day1)
 
