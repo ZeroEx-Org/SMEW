@@ -113,7 +113,7 @@ def read_input_data(project_name, value_col):
 
     return input_data
 
-def run_SMEW(project_name, input_data):
+def run_SMEW(project_name, input_data):  # , interpolate_frozen=True):
     print('--------------------------------------------------------------------------------------')
     print('Running SMEW for',project_name,'...')
 
@@ -221,13 +221,25 @@ def run_SMEW(project_name, input_data):
         data_in.M_rock_in, data_in.t_app, data_in.mineral, data_in.rock_f_in, d_in, psd_perc_in, data_in.SSA_in, data_in.diss_f, dt, conv_Al, conv_mol, keyword_add)
 
     # Interpolate zeros during frozen periods
+    #
+    # NOTE: this rewrites the 13 series below in place, so the raw biogeochem
+    # output is not recoverable from what this function returns. On a
+    # Vulkaneifel-climate January start that is ~30% of the record, and up to
+    # 7.6 pH units. It matters for golden-master tests, which otherwise pin the
+    # model and this interpolation together and cannot tell a regression in one
+    # from a change in the other.
+    #
+    # To get raw output instead, add interpolate_frozen=True to the run_SMEW
+    # signature and uncomment the guard below. Default stays interpolated.
+    #
+    # if interpolate_frozen:
     for  param in ['pH', 'Alk', 'M_rock', 'f_Ca', 'f_Mg', 'f_K', 'f_Na', 'f_H', 'f_Al', 'HCO3', 'CO3', 'CO2_air','CO2_w']:
         y = data[param]
         x = np.arange(len(y))
         # find where to interpolate
         mask = y != 0  # zero values where T_soil < 0
-        data[param] = np.interp(x, x[mask], y[mask])  # interpolation       
-        
+        data[param] = np.interp(x, x[mask], y[mask])  # interpolation
+
     # include parameters not returned by biogeochem
     data['t'] = t
     data['rain'] = rain
