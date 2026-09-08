@@ -12,4 +12,8 @@ dev.ipynb
 
 # tests/golden/*.npz are NOT ignored -- they are the regression fixtures, and
 # freeze_cases.py is tracked because the fixtures cannot be regenerated without it.
+# check_ledger.py is tracked for the same reason: smew/ledger.py is unusable
+# without it. Both need `git add -f`, since the repo root ignores tests/ entirely
+# and git does not descend into an excluded directory to see these negations.
 !freeze_cases.py
+!check_ledger.py
