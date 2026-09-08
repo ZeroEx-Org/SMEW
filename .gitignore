@@ -33,3 +33,6 @@ docs/
 *.png
 *.jpg
 *.jpeg
+
+# -- dev and test folder --
+tests/
