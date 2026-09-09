@@ -36,8 +36,11 @@ MARKERS = {"pH", "Alk", "M_rock", "Ca_tot"}
 
 NOTEBOOKS = ["Vials_Dietzen.ipynb", "Mesocosm_Kelland.ipynb", "Mesocosm_Amann.ipynb",
              "Bottles_tePas.ipynb", "Example.ipynb"]
-# Example.ipynb calls rain_stoc without a seed -> not reproducible
-UNSEEDED = {"Example.ipynb"}
+# Notebooks whose rainfall is stochastic AND unseeded cannot be reproduced, so
+# there is nothing for `check` to compare against. Empty since F0.1: Example.ipynb
+# now passes seed=42 to rain_stoc. Kept as the mechanism, not as a fact -- a new
+# notebook may well arrive unseeded.
+UNSEEDED = set()
 
 
 def exec_notebook(path):
@@ -69,8 +72,17 @@ def build(g, n_out):
     results, t = payload_for(g)
     merged = {}
     for name in sorted(results):
-        # extras that live outside biogeochem_balance but are plotted
-        extra = {k: np.asarray(g[k], dtype=float) for k in ("rain", "s", "v")
+        # Extras that live outside biogeochem_balance but are plotted.
+        #
+        # Only rain. "s" and "v" used to be taken from here too, and that was
+        # wrong: a notebook namespace holds only the LAST value assigned, so
+        # every case got the last treatment's moisture and biomass. Harmless
+        # where all treatments share one forcing, but Amann's three _nocrop
+        # cases have their own -- the frozen v was off by the whole 500 g/m2 of
+        # biomass and s by 0.176. Both are in harness.CONTRACT now, so they come
+        # from each case's own result dict, which is correct by construction.
+        # check_ledger.notebook_cases has always guarded this; this did not.
+        extra = {k: np.asarray(g[k], dtype=float) for k in ("rain",)
                  if isinstance(g.get(k), np.ndarray)
                  and np.asarray(g[k]).shape[-1:] == (len(t),)}
         p = harness.collect(results[name], t, extra=extra, n_out=n_out)

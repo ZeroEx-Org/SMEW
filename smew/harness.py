@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """Serialise a SMEW run to .npz at a chosen output resolution, and compare runs.
 
-biogeochem_balance returns ~192 names via locals(); only ~32 of them are series
-the notebooks actually consume. This module pins that subset (SCHEMA), thins it
-to a requested number of timesteps, and writes it to a compressed .npz.
+biogeochem_balance returns ~192 names via locals(); 76 of them are read by the
+notebooks, the wrapper or smew.ledger. This module pins that subset (CONTRACT),
+thins the time series among them, and writes the result to a compressed .npz.
 
 Why thin at all: a 1-year run at dt = 10 min is 52560 steps = 13.5 MB of float64
 for the schema. Writing that costs ~0.1% of the simulation's own runtime
@@ -25,16 +25,73 @@ aggregates, so a 500-point golden master catches what a 52560-point one does.
 import os
 import numpy as np
 
-# series consumed by Examples/*.ipynb, Projects/*/*.ipynb and smew.complementary
-SCHEMA_1D = [
-    "pH", "Alk", "Ca", "Mg", "K", "Na", "Si", "Al", "Al_w", "H",
-    "DIC", "CO2_w", "CO2_air", "M_rock",
-    "Ca_tot", "Mg_tot", "Si_tot", "Al_tot", "CaCO3", "MgCO3",
-    "UP_Ca", "UP_Mg", "UP_Si",
-    "f_Ca", "f_Mg", "f_K", "f_Na", "f_Al", "f_H",
+# ---------------------------------------------------------------------------
+# The output contract
+# ---------------------------------------------------------------------------
+# What biogeochem_balance must return. It currently returns ~192 names via
+# locals(); these 76 are the ones something actually reads. F1 replaces that
+# locals() dump with an explicit dict built from exactly this list, so anything
+# missing here is a name F1 would silently drop.
+#
+# There are three consumers, not one:
+#   Examples/*.ipynb, Projects/*/*.ipynb, smew.complementary   the plots
+#   wrappers_postprocessing/zeroex_input_data_wrapper.py       run_SMEW
+#   smew.ledger                                                the mass balance
+#
+# The ledger is by far the most demanding, and it was written after the first
+# version of this schema. It rebuilds every source and sink from the outside, so
+# it reads the background-input scalars, the per-mineral stoichiometry and the
+# raw fluxes -- 54 names, most of which no plot ever touches. Established
+# empirically, by recording every __getitem__ the ledger performs across all 21
+# of its cases; the set does not vary by case.
+#
+# Entries are grouped by what they are, not alphabetically, because the grouping
+# is the part that has to be maintained when a process is added.
+
+SCHEMA_1D = [                                        # shape (n_steps,)
+    # acid-base, the carbonate system, and the CO2 fluxes in and out of it
+    "pH", "H", "f_H", "Alk", "Alk_tot", "An", "An_tot",
+    "CO2_w", "CO2_air", "HCO3", "CO3", "DIC", "IC_tot", "Fs", "ADV", "DIC_rain",
+    # cations: aqueous concentration, total pool, exchanger fraction, uptake
+    "Ca", "Ca_tot", "f_Ca", "UP_Ca",
+    "Mg", "Mg_tot", "f_Mg", "UP_Mg",
+    "K", "K_tot", "f_K",
+    "Na", "Na_tot", "f_Na",
+    "Si", "Si_tot", "UP_Si",
+    # aluminium: free ion, the four hydroxide species, dissolved and total
+    "Al", "AlOH", "AlOH2", "AlOH3", "AlOH4", "Al_w", "Al_tot", "f_Al",
+    # solid phases and their dissolution fluxes
+    "M_rock", "CaCO3", "MgCO3", "W_CaCO3", "W_MgCO3",
+    # forcing carried in from the moisture, respiration and vegetation stages
+    "s", "temp_soil", "v", "I", "L", "T", "Dw", "r_het", "r_aut",
 ]
-SCHEMA_2D = ["EW", "Wr", "Omega"]  # shape (n_mineral, n_steps)
-SCHEMA = SCHEMA_1D + SCHEMA_2D
+SCHEMA_2D = ["EW", "Wr", "Omega", "M_min"]           # shape (n_mineral, n_steps)
+
+# Shape is set by the run, not by the time vector, so these are stored whole:
+# thinning and aggregating them would be meaningless.
+SCHEMA_FIXED = ["min_st", "xi"]                      # (n_mineral, 6) and (4,)
+SCHEMA_SCALAR = [
+    # background solute input, replacing what leaching and transpiration remove
+    "I_Ca", "I_Mg", "I_K", "I_Na", "I_Si", "I_An",
+    # geometry, units, and the vegetation constants the uptake recompute needs
+    "n", "Zr", "dt", "conv_mol", "conv_Al", "k_v", "RAI", "root_d",
+]
+SCHEMA_TEXT = ["mineral"]                            # list of mineral names
+
+SCHEMA_SERIES = SCHEMA_1D + SCHEMA_2D    # thinned and aggregated by collect()
+SCHEMA = SCHEMA_SERIES                   # kept: the pre-F0.1 name for this set
+CONTRACT = SCHEMA_SERIES + SCHEMA_FIXED + SCHEMA_SCALAR + SCHEMA_TEXT
+
+
+def verify_contract(data):
+    """Names in CONTRACT that this result dict does not carry.
+
+    The gate is that this comes back empty for every case, so that the contract
+    describes the output rather than wishing for it. It is also the F1 gate:
+    F1 swaps locals() for an explicit dict, and this is what says the swap left
+    nothing behind.
+    """
+    return [k for k in CONTRACT if k not in data]
 
 AGGS = {"min": np.min, "max": np.max, "mean": np.mean, "sum": np.sum}
 
@@ -132,7 +189,7 @@ def collect(data, t, n_out=None, stride=None, dt_out=None, dt=None, extra=None):
     idx = out_index(n_steps, n_out, stride, dt_out, dt)
 
     series, missing = {}, []
-    for k in SCHEMA:
+    for k in SCHEMA_SERIES:
         if k in data:
             series[k] = np.asarray(data[k], dtype=float)
         else:
@@ -160,6 +217,22 @@ def collect(data, t, n_out=None, stride=None, dt_out=None, dt=None, extra=None):
         for name, fn in AGGS.items():
             out[f"{k}__{name}"] = np.atleast_1d(np.asarray(fn(a, axis=axis), dtype=float))
         out[f"{k}__final"] = np.atleast_1d(np.asarray(a[..., -1], dtype=float))
+
+    # Everything whose shape is not (..., n_steps): stored whole, since there is
+    # nothing to thin and no aggregate that would mean anything. Cheap, and worth
+    # pinning -- a changed conv_mol, a changed min_st lookup or a changed
+    # background input I_Ca moves every number downstream, and these are the only
+    # keys that would say so directly rather than as a diff in fifty series.
+    for k in SCHEMA_FIXED + SCHEMA_SCALAR:
+        if k in data:
+            out[k] = np.atleast_1d(np.asarray(data[k], dtype=float))
+        else:
+            missing.append(k)
+    for k in SCHEMA_TEXT:
+        if k in data:
+            out[k] = np.asarray(data[k], dtype="U32").reshape(-1)
+        else:
+            missing.append(k)
 
     out.update(provenance())
     out["_idx"] = idx
@@ -196,10 +269,16 @@ def compare(ref, new, rtol=1e-12, atol=0.0):
         if k not in ref or k not in new:
             out.append((k, float("nan"), False))
             continue
-        a, b = np.asarray(ref[k], dtype=float), np.asarray(new[k], dtype=float)
+        a, b = np.asarray(ref[k]), np.asarray(new[k])
         if a.shape != b.shape:
             out.append((k, float("nan"), False))
             continue
+        if a.dtype.kind in "USO" or b.dtype.kind in "USO":
+            # text (mineral names): equal or not, there is no tolerance to apply
+            same = bool(np.array_equal(a, b))
+            out.append((k, 0.0 if same else float("nan"), same))
+            continue
+        a, b = a.astype(float), b.astype(float)
         d = float(np.max(np.abs(a - b))) if a.size else 0.0
         scale = max(float(np.max(np.abs(a))) if a.size else 0.0, 1e-300)
         out.append((k, d, bool(d <= max(atol, rtol * scale))))

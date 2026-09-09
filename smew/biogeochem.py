@@ -126,6 +126,14 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     SA = np.zeros(len(s))
     EW = np.zeros([1, len(s)])
     min_st = np.zeros([1, 6])
+    # Same unconditional default as EW above, for the same reason: without it an
+    # untreated run (M_rock_in == 0) never creates these at all, so the set of
+    # names the function returns depends on an input. The M_rock_in > 0 branch
+    # below re-allocates all three at [number_min, len(s)] and overwrites these,
+    # so no treated run sees any difference.
+    Omega = np.zeros([1, len(s)])
+    Wr = np.zeros([1, len(s)])
+    M_min = np.zeros([1, len(s)])
     
     d = np.zeros([1, len(s)])
     delta_d = np.zeros([1, len(s)])
