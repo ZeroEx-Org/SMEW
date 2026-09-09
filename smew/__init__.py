@@ -5,10 +5,6 @@ from smew.biogeochem import (
     biogeochem_balance
 )
 
-from smew.biogeochem2psd import (
-    biogeochem_balance2psd
-)
-
 from smew.constants import (
     D_0,
     Dw_0,
