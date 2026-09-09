@@ -63,6 +63,25 @@ def cold_case():
     yield "example_freezethaw", data, {"E": extra["E"]}, {"SOC": extra["SOC"]}
 
 
+def vulkaneifel_case():
+    """The wrapper path: Projects/Vulkaneifel via zeroex_input_data_wrapper.
+
+    interpolate_frozen=False is not optional here. run_SMEW's default rewrites
+    13 series across frozen steps, and Vulkaneifel is the one case that actually
+    freezes -- balancing interpolated values against real fluxes would be
+    checking a plot, not the model.
+
+    Nothing supplies E or SOC, so the water and organic-carbon balances are
+    skipped; the eight element balances are the point.
+    """
+    sys.path.insert(0, os.path.join(REPO, "wrappers_postprocessing"))
+    import zeroex_input_data_wrapper as wp
+    inp = wp.read_input_data(project_name="Vulkaneifel", value_col="Field C")
+    data = wp.run_SMEW(project_name="Vulkaneifel", input_data=inp,
+                       interpolate_frozen=False, seed=42)
+    yield "Vulkaneifel:raw", data, None, None
+
+
 def notebook_cases(nb):
     """Every biogeochem result dict a notebook leaves behind.
 
@@ -97,6 +116,8 @@ def run(a):
                 cases.append(("example", example_case, None))
             elif want.lower() in ("cold", "example_cold"):
                 cases.append(("example_cold", cold_case, None))
+            elif want.lower() in ("vulkaneifel", "wrapper"):
+                cases.append(("Vulkaneifel", vulkaneifel_case, None))
             else:
                 nb = want if want.endswith(".ipynb") else want + ".ipynb"
                 cases.append((nb, notebook_cases, nb))
@@ -105,6 +126,7 @@ def run(a):
         cases.append(("example_cold", cold_case, None))
         for nb in NOTEBOOKS:
             cases.append((nb, notebook_cases, nb))
+        cases.append(("Vulkaneifel", vulkaneifel_case, None))
 
     rc = 0
     n_case = n_ok = 0

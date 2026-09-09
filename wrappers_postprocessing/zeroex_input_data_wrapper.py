@@ -113,7 +113,17 @@ def read_input_data(project_name, value_col):
 
     return input_data
 
-def run_SMEW(project_name, input_data):  # , interpolate_frozen=True):
+def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None):
+    """Run the full SMEW pipeline for a project data sheet.
+
+    interpolate_frozen : rewrite the 13 series listed below across frozen steps.
+        True is the historical behaviour and stays the default. Pass False to
+        get the raw biogeochem output, which is what a golden master needs --
+        see the note at that block.
+    seed : passed to rain_stoc_season. None keeps the unseeded default, so
+        repeated runs differ; an int makes the run reproducible, which is what
+        tests/freeze_cases.py uses.
+    """
     print('--------------------------------------------------------------------------------------')
     print('Running SMEW for',project_name,'...')
 
@@ -161,7 +171,7 @@ def run_SMEW(project_name, input_data):  # , interpolate_frozen=True):
     #stochastic rain with seasonality [m] (only works with multi-year)
     alfa_rain = data_in.alfa_rain*10**(-3) # Convert from mm to m
     # day1 must be passed so the monthly lambda/alfa align with the start month
-    rain = smew.rain_stoc_season(data_in.lambda_rain, alfa_rain, t_end, dt, data_in.day1)
+    rain = smew.rain_stoc_season(data_in.lambda_rain, alfa_rain, t_end, dt, data_in.day1, seed=seed)
 
     #vegetation [g/m2]
     v_in = 0
@@ -229,16 +239,14 @@ def run_SMEW(project_name, input_data):  # , interpolate_frozen=True):
     # model and this interpolation together and cannot tell a regression in one
     # from a change in the other.
     #
-    # To get raw output instead, add interpolate_frozen=True to the run_SMEW
-    # signature and uncomment the guard below. Default stays interpolated.
-    #
-    # if interpolate_frozen:
-    for  param in ['pH', 'Alk', 'M_rock', 'f_Ca', 'f_Mg', 'f_K', 'f_Na', 'f_H', 'f_Al', 'HCO3', 'CO3', 'CO2_air','CO2_w']:
-        y = data[param]
-        x = np.arange(len(y))
-        # find where to interpolate
-        mask = y != 0  # zero values where T_soil < 0
-        data[param] = np.interp(x, x[mask], y[mask])  # interpolation
+    # interpolate_frozen=False returns the raw series instead. Default unchanged.
+    if interpolate_frozen:
+        for  param in ['pH', 'Alk', 'M_rock', 'f_Ca', 'f_Mg', 'f_K', 'f_Na', 'f_H', 'f_Al', 'HCO3', 'CO3', 'CO2_air','CO2_w']:
+            y = data[param]
+            x = np.arange(len(y))
+            # find where to interpolate
+            mask = y != 0  # zero values where T_soil < 0
+            data[param] = np.interp(x, x[mask], y[mask])  # interpolation
 
     # include parameters not returned by biogeochem
     data['t'] = t

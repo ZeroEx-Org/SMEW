@@ -36,6 +36,8 @@ MARKERS = {"pH", "Alk", "M_rock", "Ca_tot"}
 
 NOTEBOOKS = ["Vials_Dietzen.ipynb", "Mesocosm_Kelland.ipynb", "Mesocosm_Amann.ipynb",
              "Bottles_tePas.ipynb", "Example.ipynb"]
+# not a notebook: driven through wrappers_postprocessing. See build_wrapper.
+WRAPPER_CASE = "Vulkaneifel"
 # Notebooks whose rainfall is stochastic AND unseeded cannot be reproduced, so
 # there is nothing for `check` to compare against. Empty since F0.1: Example.ipynb
 # now passes seed=42 to rain_stoc. Kept as the mechanism, not as a fact -- a new
@@ -92,6 +94,45 @@ def build(g, n_out):
     return merged
 
 
+# ---------------------------------------------------------------------------
+# The wrapper path
+# ---------------------------------------------------------------------------
+# Vulkaneifel is not a notebook case. Its notebook is two calls into
+# wrappers_postprocessing, so driving those directly is both faster and a truer
+# test: it is the only case that exercises read_input_data, the xlsx data sheet,
+# run_SMEW, day1=291 (an October start, which is what the seasonal rain rotation
+# was added for) and four minerals at once.
+#
+# Two payloads, because run_SMEW does two separable things:
+#   raw     -- interpolate_frozen=False, the model's own output. This is what F1
+#              must preserve, and the only one a model regression can be read off.
+#   interp  -- the default, with the 13 series rewritten across frozen steps.
+#              Frozen separately so a change in the interpolation shows up as a
+#              change in `interp` alone, instead of being indistinguishable from
+#              a change in the model.
+VULKANEIFEL = ("Vulkaneifel", "Field C")
+
+
+def build_wrapper(n_out, seed=42):
+    sys.path.insert(0, os.path.join(REPO, "wrappers_postprocessing"))
+    import zeroex_input_data_wrapper as wp
+
+    project, field = VULKANEIFEL
+    inp = wp.read_input_data(project_name=project, value_col=field)
+    merged = {}
+    for name, interp in (("raw", False), ("interp", True)):
+        data = wp.run_SMEW(project_name=project, input_data=inp,
+                           interpolate_frozen=interp, seed=seed)
+        t = np.asarray(data["t"], dtype=float)
+        extra = {k: np.asarray(data[k], dtype=float)
+                 for k in ("rain", "s_filtered") if k in data}
+        p = harness.collect(data, t, extra=extra, n_out=n_out)
+        for k, v in p.items():
+            merged[k if k.startswith("_") or k == "t" else f"{name}.{k}"] = v
+    merged["_cases"] = np.array(["raw", "interp"], dtype="U32")
+    return merged
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["freeze", "check"])
@@ -103,7 +144,7 @@ def main():
     a = ap.parse_args()
 
     os.chdir(REPO)
-    todo = a.only or NOTEBOOKS
+    todo = a.only or NOTEBOOKS + [WRAPPER_CASE]
     rc = 0
     for nb in todo:
         stem = nb.replace(".ipynb", "")
@@ -113,8 +154,11 @@ def main():
             continue
         t0 = time.perf_counter()
         try:
-            g = exec_notebook(os.path.join(REPO, "Examples", nb))
-            p = build(g, a.n_out)
+            if nb == WRAPPER_CASE:
+                p = build_wrapper(a.n_out)
+            else:
+                g = exec_notebook(os.path.join(REPO, "Examples", nb))
+                p = build(g, a.n_out)
         except Exception as e:
             print(f"{stem:20s} ERROR  {type(e).__name__}: {e}")
             print("   " + "\n   ".join(traceback.format_exc().strip().splitlines()[-3:]))
