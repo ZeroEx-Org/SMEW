@@ -269,18 +269,30 @@ def mineral_weathering(mineral, Tk, Omega, H, Al, conv_mol, conv_Al):
         rate = rplus * (1 - (Omega**(1/Sig)))
 
     elif mineral == 'wollastonite': #CaSiO3;M 117.1 g/mol
-        Aa = 700*24*3600*conv_mol #mol.m-2.s-1 
-        Ab = 20*24*3600*conv_mol #mol.m-2.s-1  
+        Aa = 700*24*3600*conv_mol #mol.m-2.s-1
+        Ab = 20*24*3600*conv_mol #mol.m-2.s-1
         Ea = 56000/conv_mol #J.mol-1
         Eb = 52000/conv_mol #J.mol-1
         ACTI = H
         na = 0.4
         nb = 0.15
         Sig = 1
-		#rate equations 
+		#rate equations
         rplusa = Aa* (np.exp(-Ea/ (R * Tk)))*(ACTI**na )
         rplusb = Ab* (np.exp(-Eb/ (R * Tk)))*(ACTI**nb )
         rplus = rplusa + rplusb
+        rate = rplus * (1 - (Omega**(1/Sig)))
+
+    elif mineral == 'sio2(a,gl)': #SiO2 (amorphous silica/glass); M 60.0848 g/mol
+        # Palandri & Kharaka (2004) Table 6, amorphous silica dissolution, Rimstidt & Barnes (1980) row (footnote f):
+        # A=1.85E-01 mol.m-2.s-1, E=68.7 kJ/mol. Neutral mechanism only - the table gives no acid/base terms for
+        # this phase, consistent with amorphous silica dissolution being ~pH-independent away from strongly alkaline pH.
+        An = 1.85*10**(-1)*24*3600*conv_mol #mol.m-2.s-1
+        En = 68700/conv_mol #J.mol-1
+        Sig = 1
+		#rate equation
+        rplusn = An* (np.exp(-En/ (R * Tk)))
+        rplus = rplusn
         rate = rplus * (1 - (Omega**(1/Sig)))
 
     else:
@@ -423,6 +435,14 @@ def Omega_sil(mineral, Ca, Mg, K, Na, Si, H, Al, Fe, K_sp, conv_mol, conv_Al):
         Sanidine41 =  ((((K/conv_mol)*(Al/conv_mol)*(Si/conv_mol)**3)/(H/conv_mol)**4) / 10**0.9239)*0.41
         Omega = min(1, (Anorthite03 * Albite65 * Sanidine41))
 
+    elif mineral == 'sio2(a,gl)': #SiO2 (amorphous silica/glass)
+        # SiO2(a,gl) + 2 H2O = H4SiO4
+        # MINTEQA2 database line gives log K = 3.0180 for the formation direction (components -> solid);
+        # dissolution-direction log K used here is the reciprocal, -3.0180, which reproduces a plausible
+        # amorphous-silica-glass solubility (~58 mg/L SiO2, between quartz and fresh amorphous silica).
+        # No mineral_weathering() rate law exists for this phase yet (source entry has no kinetic parameters) -
+        # Omega is computed here but a run naming this mineral will still raise ValueError at the rate step.
+        Omega = min(1, (Si/conv_mol) / 10**(-3.0180))
 
     #elif mineral in ['apatite','muscovite', 'chabazite', 'heulandite', 'clinoptilolite']:
     #    Omega = 0

@@ -241,6 +241,11 @@ def min_const(mineral,conv_mol):
         MM_min = 156
         min_st = [0.03, 0, 0.41, 0.56, 1.03, 2.97]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
 
+    elif mineral == 'sio2(a,gl)': #SiO2 (amorphous silica/glass); GFW and density from MINTEQA2
+        MM_min = 60.0848
+        min_st = [0, 0, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        # No KINEC/kinetic rate law available for this phase yet -> not usable in mineral_weathering()/biogeochem_balance.
+
     else:
         raise ValueError("No data for this mineral")
 
