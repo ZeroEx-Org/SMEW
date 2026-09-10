@@ -202,6 +202,24 @@ def build(data, water=None, oc=None):
         """
         return (min_st[:, MIN_ST_COL[el]] @ EW[:, j]) * dt
 
+    def clipped(el):
+        """Mass the F2 positivity limiter could not remove, per step [mol].
+
+        A SOURCE row, not a sink: the explicit update intended to remove some
+        amount, found the pool would go negative, and removed less. What it did
+        not remove stayed in the pool, so it enters the balance with the same
+        sign as an input. Recording it is what keeps closure honest -- clamping
+        a pool at zero and saying nothing destroys mass silently, which is
+        exactly the failure this ledger exists to catch.
+
+        Zero on every step of every benchmark case. Absent entirely from result
+        dicts produced before F2, hence the .get.
+        """
+        key = "clip_" + el
+        if key not in data:
+            return np.zeros(len(i))
+        return np.asarray(data[key], dtype=float)[i]
+
     # water carried out of the layer, per step, in litres per m2
     drain = L[j] * 1000 * dt                 # below the root zone
     transp = T[j] * 1000 * dt                # pulled through the plant
@@ -219,7 +237,8 @@ def build(data, water=None, oc=None):
         d["Ca_tot"], i, j,
         sources={"background": d["I_Ca"] * dt * np.ones(len(i)),
                  "mineral": mineral("Ca"),
-                 "carbonate": d["W_CaCO3"][j] * dt},
+                 "carbonate": d["W_CaCO3"][j] * dt,
+                 "clipping_retained": clipped("Ca")},
         sinks={"drainage": drain * d["Ca"][j],
                "transpiration": transp * d["Ca"][j],
                "uptake_active": up[:, 0] * dt})
@@ -229,7 +248,8 @@ def build(data, water=None, oc=None):
         d["Mg_tot"], i, j,
         sources={"background": d["I_Mg"] * dt * np.ones(len(i)),
                  "mineral": mineral("Mg"),
-                 "carbonate": d["W_MgCO3"][j] * dt},
+                 "carbonate": d["W_MgCO3"][j] * dt,
+                 "clipping_retained": clipped("Mg")},
         sinks={"drainage": drain * d["Mg"][j],
                "transpiration": transp * d["Mg"][j],
                "uptake_active": up[:, 1] * dt})
@@ -238,7 +258,8 @@ def build(data, water=None, oc=None):
     el["K"] = _pool(
         d["K_tot"], i, j,
         sources={"background": d["I_K"] * dt * np.ones(len(i)),
-                 "mineral": mineral("K")},
+                 "mineral": mineral("K"),
+                 "clipping_retained": clipped("K")},
         sinks={"drainage": drain * d["K"][j],
                "transpiration": transp * d["K"][j],
                "uptake_active": up[:, 2] * dt})
@@ -248,7 +269,8 @@ def build(data, water=None, oc=None):
     el["Na"] = _pool(
         d["Na_tot"], i, j,
         sources={"background": d["I_Na"] * dt * np.ones(len(i)),
-                 "mineral": mineral("Na")},
+                 "mineral": mineral("Na"),
+                 "clipping_retained": clipped("Na")},
         sinks={"drainage": drain * d["Na"][j],
                "transpiration": transp * d["Na"][j]})
 
@@ -259,14 +281,16 @@ def build(data, water=None, oc=None):
     # dissolved species are missing. Quantified in diagnostics, not judged here.
     el["Al"] = _pool(
         d["Al_tot"], i, j,
-        sources={"mineral": mineral("Al") * d["conv_Al"]},
+        sources={"mineral": mineral("Al") * d["conv_Al"],
+                 "clipping_retained": clipped("Al")},
         sinks={"drainage": drain * (d["Al"][j] + d["AlOH4"][j])})
 
     # --- silicon ------------------------------------------------------------
     el["Si"] = _pool(
         d["Si_tot"], i, j,
         sources={"background": d["I_Si"] * dt * np.ones(len(i)),
-                 "mineral": mineral("Si")},
+                 "mineral": mineral("Si"),
+                 "clipping_retained": clipped("Si")},
         sinks={"drainage": drain * d["Si"][j],
                "transpiration": transp * d["Si"][j],
                "uptake_active": up[:, 3] * dt})
@@ -281,7 +305,8 @@ def build(data, water=None, oc=None):
     # of this pool fixes how much alkalinity is left over.
     el["An"] = _pool(
         d["An_tot"], i, j,
-        sources={"background": d["I_An"] * dt * np.ones(len(i))},
+        sources={"background": d["I_An"] * dt * np.ones(len(i)),
+                 "clipping_retained": clipped("An")},
         sinks={"drainage": drain * d["An"][j],
                "transpiration": transp * d["An"][j]})
 
@@ -304,7 +329,8 @@ def build(data, water=None, oc=None):
         sources={"rain": I[i] * 1000 * d["DIC_rain"][i],
                  "respiration_het": d["r_het"][j] * dt,
                  "respiration_aut": d["r_aut"][j] * dt,
-                 "carbonate": (d["W_CaCO3"][j] + d["W_MgCO3"][j]) * dt},
+                 "carbonate": (d["W_CaCO3"][j] + d["W_MgCO3"][j]) * dt,
+                 "clipping_retained": clipped("C")},
         sinks={"efflux": d["Fs"][j] * dt,
                "drainage": drain * d["DIC"][j],
                "gas_displacement": d["ADV"][i]})
@@ -436,6 +462,34 @@ def _diagnostics(d, i, j, min_st, EW, dt):
     dg = {}
     temp = np.asarray(d["temp_soil"], dtype=float)
     dt_, L, T = d["dt"], d["L"], d["T"]
+
+    # --- F2 sub-stepping ----------------------------------------------------
+    # Every balance below reconstructs ONE forward-Euler step from `last` to i,
+    # using the concentrations stored at `last`. Where F2 sub-divided the
+    # interval, the model instead took several shorter steps with concentrations
+    # that changed along the way, so that reconstruction does not describe what
+    # happened and its residual is meaningless. Those steps are counted and
+    # named here, and closure() refuses to gate a run containing any of them,
+    # rather than reporting a failure the model did not commit.
+    #
+    # n_substeps == 0 marks a step where sub-dividing did not rescue the pool
+    # and the clamp was used after all; that step IS a single Euler step, so it
+    # is reconstructible and only the clipping rows are needed.
+    ns = np.asarray(d.get("n_substeps", np.ones(len(temp))), dtype=float)
+    sub = np.nonzero(ns[i] > 1)[0] if len(i) else np.array([], dtype=int)
+    dg["n_substepped_steps"] = int(len(sub))
+    dg["substepped_indices"] = [int(i[k]) for k in sub[:20]]
+    dg["n_clamped_steps"] = int(np.count_nonzero(ns[i] == 0)) if len(i) else 0
+
+    # total mass the limiter destroyed, per pool, over the run
+    clipped_tot = {}
+    for _el in ELEMENTS:
+        _k = "clip_" + _el
+        if _k in d:
+            _v = float(np.sum(np.asarray(d[_k], dtype=float)[i])) if len(i) else 0.0
+            if _v != 0.0:
+                clipped_tot[_el] = _v
+    dg["clipped_total"] = clipped_tot
 
     # --- freezing -----------------------------------------------------------
     frozen = np.where(temp[1:] <= 0)[0] + 1
@@ -734,6 +788,20 @@ def failures(led, rows=None):
     """Every gated check that did not clear its threshold, as readable reasons."""
     rows = rows if rows is not None else closure(led)
     out = []
+
+    # A sub-stepped interval is not a single Euler step, so the reconstruction
+    # below does not describe it and its residual means nothing. Say so once,
+    # loudly, instead of reporting eight element failures the model did not
+    # commit. Nothing in the benchmark suite sub-steps, so this never fires
+    # there; it fires on deliberately over-long dt, which is the point.
+    ns = led["diagnostics"].get("n_substepped_steps", 0)
+    if ns:
+        idx = led["diagnostics"].get("substepped_indices", [])
+        out.append(f"not reconstructible: {ns} step(s) were sub-divided by the "
+                   f"positivity limiter (indices {idx[:6]}"
+                   f"{', ...' if len(idx) > 6 else ''}); the ledger rebuilds "
+                   f"single forward-Euler steps and cannot verify these")
+
     for r in rows:
         if r["inactive"] or r["ok"]:
             continue

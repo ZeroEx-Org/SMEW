@@ -4,7 +4,7 @@
 Created on Mon Dec 16 14:34:44 2019
 """
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import numpy as np
 import smew
@@ -139,6 +139,9 @@ def _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
                         k1=k1[i], k2=k2[i], k_w=k_w[i], k_H=k_H[i],
                         DIC_rain=DIC_rain[i])
             for i in range(len(s))]
+
+
+_FORCING_FIELDS = tuple(f.name for f in fields(StepForcing))
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +317,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         M_rock=M_rock, SA=SA, M_min=M_min, rock_f=rock_f,
         EW=EW, Wr=Wr, Omega=Omega,
         d=d, delta_d=delta_d, lamb=lamb, SSA=SSA, psd=psd,
+        clip_M_min=np.zeros(p.number_min),
     )
     return state, p, applied
 
@@ -322,8 +326,10 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
 # One timestep
 # ---------------------------------------------------------------------------
 
-def step(state, params, now, prev, dt, post_application=True, rock_now=None):
-    """Advance the chemistry by one timestep. Pure: `state` is never modified.
+def _step_once(state, params, now, prev, dt, post_application=True, rock_now=None):
+    """One forward-Euler-plus-implicit-solve timestep. See step() for the wrapper.
+
+    Pure: `state` is never modified.
 
         state   the state to advance FROM. Not necessarily the previous index:
                 through a frost the model holds, then resumes from the last
@@ -372,10 +378,61 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None):
     Si_tot = state.Si_tot + (p.I_Si + np.sum(min_st[:, 5] * EW_p)
                              - LT * state.Si - UP_Si) * dt
     An_tot = state.An_tot + (p.I_An - (prev.L + prev.T) * state.An * 1000) * dt
-    Alk_tot = 2 * Mg_tot + 2 * Ca_tot + Na_tot + K_tot - An_tot     # [mol_c]
     IC_tot = (state.IC_tot + now.I * 1000 * now.DIC_rain - ADV
               + (state.W_CaCO3 + state.W_MgCO3 + prev.r_het + prev.r_aut
                  - state.Fs - prev.L * 1000 * state.DIC) * dt)
+
+    # --- F2: positivity ------------------------------------------------------
+    # Forward Euler with loss terms evaluated at the previous step has no lower
+    # bound: if dt x loss exceeds the pool, the pool goes negative and the
+    # implicit solve below is handed a negative total, which either fails or
+    # returns a state that propagates.
+    #
+    # The limiter is written as a clamp on the ALREADY-COMPUTED total rather
+    # than as a rearrangement into sources-minus-sinks, deliberately. Splitting
+    # `pool + (a + b + c - d - e)*dt` into `pool + (src - loss)*dt` re-associates
+    # the sum and changes the last bits -- which is exactly the mistake F1 made
+    # and the golden masters caught. This form is bit-identical whenever no
+    # clipping occurs, which is every step of every benchmark case.
+    #
+    # dt_max is the largest step that would have kept every pool non-negative.
+    # It follows from the totals already in hand: if a pool falls from `pool` to
+    # `tent` over dt, the net loss rate is (pool - tent)/dt, so the pool would
+    # reach zero at dt * pool / (pool - tent). Reported per step; the minimum
+    # over a run is the model's documented stable dt, which nothing has ever
+    # stated before.
+    clip_Ca = clip_Mg = clip_K = clip_Na = 0.0
+    clip_Al = clip_Si = clip_An = clip_C = 0.0
+    dt_max = float("inf")
+    for _pool, _tent in ((state.Ca_tot, Ca_tot), (state.Mg_tot, Mg_tot),
+                         (state.K_tot, K_tot), (state.Na_tot, Na_tot),
+                         (state.Al_tot, Al_tot), (state.Si_tot, Si_tot),
+                         (state.An_tot, An_tot), (state.IC_tot, IC_tot)):
+        if _tent < _pool and _pool > 0.0:
+            _lim = dt * _pool / (_pool - _tent)
+            if _lim < dt_max:
+                dt_max = _lim
+    if Ca_tot < 0.0:
+        clip_Ca = -Ca_tot; Ca_tot = 0.0
+    if Mg_tot < 0.0:
+        clip_Mg = -Mg_tot; Mg_tot = 0.0
+    if K_tot < 0.0:
+        clip_K = -K_tot; K_tot = 0.0
+    if Na_tot < 0.0:
+        clip_Na = -Na_tot; Na_tot = 0.0
+    if Al_tot < 0.0:
+        clip_Al = -Al_tot; Al_tot = 0.0
+    if Si_tot < 0.0:
+        clip_Si = -Si_tot; Si_tot = 0.0
+    if An_tot < 0.0:
+        clip_An = -An_tot; An_tot = 0.0
+    if IC_tot < 0.0:
+        clip_C = -IC_tot; IC_tot = 0.0
+
+    # Alk_tot is DEFINED from the cation pools rather than integrated, so it is
+    # formed after they are final. It is a charge balance and may legitimately
+    # be negative; it is never clamped.
+    Alk_tot = 2 * Mg_tot + 2 * Ca_tot + Na_tot + K_tot - An_tot     # [mol_c]
 
     # implicit system.
     #
@@ -463,8 +520,18 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None):
     Fs = now.D / (p.Z_CO2) * (CO2_air - p.CO2_atm) * 1000  # [mol/d]
 
     # Carbonate minerals
+    #
+    # The dissolution branch of carb_W is proportional to the pool
+    # (W = s*CaCO3*(1-Omega)/tau), so this is an exponential decay integrated
+    # explicitly: once s*(1-Omega)*dt/tau exceeds 1 the pool overshoots through
+    # zero. Same clamp, same recording.
     CaCO3 = state.CaCO3 - state.W_CaCO3 * dt               # [mol-conv]
     MgCO3 = state.MgCO3 - state.W_MgCO3 * dt
+    clip_CaCO3 = clip_MgCO3 = 0.0
+    if CaCO3 < 0.0:
+        clip_CaCO3 = -CaCO3; CaCO3 = 0.0
+    if MgCO3 < 0.0:
+        clip_MgCO3 = -MgCO3; MgCO3 = 0.0
 
     # Carbonate weathering
     Omega_CaCO3 = Ca * CO3 / p.K_CaCO3                     # [-]
@@ -477,6 +544,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None):
     M_min, M_rock, rock_f = state.M_min, state.M_rock, state.rock_f
     d, delta_d = state.d, state.delta_d
     lamb, SSA, psd, SA = state.lamb, state.SSA, state.psd, state.SA
+    clip_M_min = np.zeros(p.number_min)
     Omega = np.zeros(p.number_min)
     Wr = np.zeros(p.number_min)
     EW = np.zeros(p.number_min)
@@ -498,6 +566,11 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None):
         if post_application:
             # mineral fractions in rock
             M_min = state.M_min - state.EW * p.MM_min * dt         # [g]
+            # This clamp is not new -- it has always been here. What is new is
+            # that the amount is recorded. It is the mass the rock is credited
+            # with losing but does not have, and F0 flagged it as crediting
+            # cations to solution that never left the rock.
+            clip_M_min = np.maximum(-M_min, 0.0)
             M_min = np.maximum(M_min, 0)
             M_rock = np.sum(M_min) + p.M_iner                      # [g]
             # rock_f stays zero, not held, when the rock is gone: that is what
@@ -537,15 +610,135 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None):
         EW=EW, Wr=Wr, Omega=Omega,
         d=d, delta_d=delta_d, lamb=lamb, SSA=SSA, psd=psd,
         UP_Ca=UP_Ca, UP_Mg=UP_Mg, UP_K=UP_K, UP_Si=UP_Si,
+        clip_Ca=clip_Ca, clip_Mg=clip_Mg, clip_K=clip_K, clip_Na=clip_Na,
+        clip_Al=clip_Al, clip_Si=clip_Si, clip_An=clip_An, clip_C=clip_C,
+        clip_CaCO3=clip_CaCO3, clip_MgCO3=clip_MgCO3, clip_M_min=clip_M_min,
+        dt_max=dt_max, n_substeps=1.0,
     )
-    return new, {"up_act": UP_act, "errors": errors, "rung": rung}
+    # Is that clipping meaningful, or is it roundoff on an empty pool?
+    #
+    # This distinction is not pedantry. A forsterite run carries no aluminium at
+    # all, so Al_tot sits at zero plus float noise and goes very slightly
+    # negative on occasional steps -- clip_Al ~ 1e-39. Treating that as a
+    # positivity failure sent the sub-stepper through 2, 4, 8, 16, 32 -- 62
+    # extra implicit solves -- to "fix" a denormal, and then reported failure.
+    # So significance is judged against the largest pool in the system, the same
+    # way smew.ledger's ACTIVITY_FLOOR refuses to gate a pool that is entirely
+    # noise. Rock is compared against rock: it is grams, not moles, and summing
+    # the two would be dimensionally meaningless.
+    scale_mol = max(abs(state.Ca_tot), abs(state.Mg_tot), abs(state.K_tot),
+                    abs(state.Na_tot), abs(state.Al_tot), abs(state.Si_tot),
+                    abs(state.An_tot), abs(state.IC_tot), abs(state.CaCO3),
+                    abs(state.MgCO3))
+    clipped_mol = (clip_Ca + clip_Mg + clip_K + clip_Na + clip_Al + clip_Si
+                   + clip_An + clip_C + clip_CaCO3 + clip_MgCO3)
+    clipped_rock = float(np.sum(clip_M_min))
+    significant = (clipped_mol > CLIP_REL * scale_mol
+                   or clipped_rock > CLIP_REL * max(abs(state.M_rock), 0.0))
+    return new, {"up_act": UP_act, "errors": errors, "rung": rung,
+                 "clipped": clipped_mol + clipped_rock,
+                 "significant": bool(significant)}
+
+
+# The positivity limiter above is a last resort: it keeps the run alive and
+# leaves an auditable record, but it destroys mass. Sub-stepping is the fix --
+# the step was simply too long for the state it started from, so shorten it.
+#
+# CLIP_REL is what counts as a real clip rather than float noise, as a fraction
+# of the largest pool in the system. 1e-12 is far above double-precision noise
+# on a pool (~1e-16 relative) and far below any amount of mass worth arguing
+# about.
+CLIP_REL = 1e-12
+MAX_SUBSTEPS = 32       # 2, 4, 8, 16, 32; beyond this, accept the clip
+
+
+def _lerp_forcing(a, b, f):
+    """Forcing part-way through an interval, for sub-stepping.
+
+    Linear in every driver, so a single sub-step (f = 1) reproduces `b` exactly
+    and the no-sub-stepping path is untouched. `I` is handled by the caller: it
+    is a per-step DEPTH of infiltrating water, not a rate, so splitting an
+    interval must divide it among the sub-steps rather than interpolate it.
+    """
+    if f >= 1.0:
+        return b
+    return StepForcing(**{k: getattr(a, k) + (getattr(b, k) - getattr(a, k)) * f
+                          for k in _FORCING_FIELDS})
+
+
+def step(state, params, now, prev, dt, post_application=True, rock_now=None,
+         max_substeps=MAX_SUBSTEPS):
+    """Advance the chemistry by one timestep, sub-stepping if it is too long.
+
+        state   the state to advance FROM. Not necessarily the previous index:
+                through a frost the model holds, then resumes from the last
+                unfrozen state, and the caller passes that one.
+        now     this timestep's forcing
+        prev    the forcing at the step `state` belongs to. The explicit
+                balances evaluate their loss terms at that step, not at this
+                one, so both are needed.
+        post_application
+                whether the rock geometry evolves this step. False before and
+                exactly at the application timestep, where the geometry is the
+                applied one and `rock_now` supplies it.
+        max_substeps
+                give up sub-dividing beyond this and accept the clip. Set to 1
+                to disable sub-stepping entirely and clamp instead.
+
+    A full-length step is tried first, so when nothing is wrong -- every step of
+    every benchmark case -- this is exactly _step_once and the result is
+    bit-identical. Only if that step had to clip is the interval sub-divided,
+    which is why F2 changes results only where the old scheme was already
+    producing a negative pool.
+
+    Returns (new_state, diagnostics).
+    """
+    new, diag = _step_once(state, params, now, prev, dt, post_application, rock_now)
+    if not diag["significant"] or max_substeps <= 1:
+        return new, diag
+
+    n = 2
+    while n <= max_substeps:
+        st = state
+        acc = None
+        ok = True
+        for m in range(n):
+            sub_prev = _lerp_forcing(prev, now, m / n)
+            sub_now = _lerp_forcing(prev, now, (m + 1) / n)
+            # the interval's infiltration is shared out, not repeated
+            sub_now = replace(sub_now, I=now.I / n)
+            st, d = _step_once(st, params, sub_now, sub_prev, dt / n,
+                               post_application, rock_now)
+            acc = d if acc is None else {
+                "up_act": acc["up_act"],          # the first sub-step's, see below
+                "errors": d["errors"],
+                "rung": max(acc["rung"], d["rung"]),
+                "clipped": acc["clipped"] + d["clipped"],
+                "significant": False,
+            }
+            if d["significant"]:
+                ok = False
+                break
+        if ok:
+            st.n_substeps = float(n)
+            st.dt_max = new.dt_max
+            acc["substeps"] = n
+            return st, acc
+        n *= 2
+
+    # Sub-dividing did not rescue it. Keep the clamped full step, which at least
+    # records what it destroyed, and let the caller see n_substeps == 0 as the
+    # marker that the limiter was reached rather than avoided.
+    new.n_substeps = 0.0
+    diag["substeps"] = 0
+    return new, diag
 
 
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -553,6 +746,12 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     The 34-argument signature is unchanged and the returned series are unchanged.
     Internally this is now a loop over `step`, against one `SoilParams` resolved
     once and one `StepForcing` per timestep; see smew/state.py.
+
+    max_substeps is keyword-only and defaults to the module setting, so the 34
+    positional arguments are exactly as they were. Set it to 1 to disable
+    sub-stepping and fall back to clamping, which is how the clipping rows in
+    smew.ledger are exercised -- with sub-stepping on, no case in the suite ever
+    reaches the clamp.
 
     The `D` argument is accepted and discarded. It has never been used: the CO2
     diffusivity is recomputed below from the moisture series before D is read,
@@ -662,7 +861,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                             out["SSA"][:, i].copy(), out["psd"][:, i].copy(),
                             out["SA"][i])
 
-            new, diag = step(st, p, forcing[i], forcing[last], dt, post, rock_now)
+            new, diag = step(st, p, forcing[i], forcing[last], dt, post, rock_now,
+                             max_substeps=max_substeps)
             new.write_into(out, i)
 
             # Uptake is stored at `last`, not at i. That is what the model has
@@ -724,4 +924,19 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         "k_v": k_v, "RAI": RAI, "root_d": root_d,
         # --- what was applied ---
         "mineral": mineral,
+        # --- F2 positivity bookkeeping ---
+        # Mass the explicit update could not remove without driving a pool
+        # negative. Zero on every step of every benchmark case; non-zero means
+        # conservation was broken here, deliberately and visibly, and
+        # smew.ledger carries each of these as its own row.
+        "clip_Ca": out["clip_Ca"], "clip_Mg": out["clip_Mg"],
+        "clip_K": out["clip_K"], "clip_Na": out["clip_Na"],
+        "clip_Al": out["clip_Al"], "clip_Si": out["clip_Si"],
+        "clip_An": out["clip_An"], "clip_C": out["clip_C"],
+        "clip_CaCO3": out["clip_CaCO3"], "clip_MgCO3": out["clip_MgCO3"],
+        "clip_M_min": out["clip_M_min"],
+        # dt_max: the largest step that would have kept every pool
+        # non-negative [d]. n_substeps: how many sub-intervals the step needed
+        # (1 = none, 0 = sub-dividing failed and the clamp was used).
+        "dt_max": out["dt_max"], "n_substeps": out["n_substeps"],
     }

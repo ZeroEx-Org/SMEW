@@ -155,8 +155,13 @@ STATE_1D = (
     "Al", "AlOH", "AlOH2", "AlOH3", "AlOH4", "Al_w", "Al_tot", "f_Al",
     "R_alk", "M_rock", "CaCO3", "MgCO3", "W_CaCO3", "W_MgCO3",
     "Omega_CaCO3", "Omega_MgCO3", "SA",
+    # F2 positivity bookkeeping, all zero on a well-behaved step
+    "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
+    "clip_An", "clip_C", "clip_CaCO3", "clip_MgCO3",
+    "dt_max", "n_substeps",
 )
-STATE_MIN = ("EW", "Wr", "Omega", "M_min", "rock_f")      # (n_mineral, n_steps)
+STATE_MIN = ("EW", "Wr", "Omega", "M_min", "rock_f",
+             "clip_M_min")                                # (n_mineral, n_steps)
 STATE_PSD = ("d", "delta_d", "lamb", "SSA", "psd")        # (n_class,   n_steps)
 
 
@@ -203,6 +208,23 @@ class SoilState:
     lamb: np.ndarray; SSA: np.ndarray; psd: np.ndarray
     # uptake fluxes of the transition into this state
     UP_Ca: float = 0.0; UP_Mg: float = 0.0; UP_K: float = 0.0; UP_Si: float = 0.0
+
+    # -- F2: what the positivity limiter had to do to get here ---------------
+    # clip_* is mass the explicit update would have removed but could not,
+    # because the pool would have gone negative [mol, or g for clip_M_min].
+    # It is a real loss of conservation, so it is recorded rather than hidden:
+    # smew.ledger carries each one as its own row and closure still has to hold.
+    # Zero on every step of every benchmark case -- see check_dt.py.
+    clip_Ca: float = 0.0; clip_Mg: float = 0.0; clip_K: float = 0.0
+    clip_Na: float = 0.0; clip_Al: float = 0.0; clip_Si: float = 0.0
+    clip_An: float = 0.0; clip_C: float = 0.0
+    clip_CaCO3: float = 0.0; clip_MgCO3: float = 0.0
+    clip_M_min: np.ndarray = None
+    # dt_max is the largest timestep this state could have been advanced by
+    # without any pool going negative [d]; n_substeps is how many sub-intervals
+    # the step actually needed (1 when nothing was wrong).
+    dt_max: float = float("inf")
+    n_substeps: float = 1.0
 
     # -- array <-> state ---------------------------------------------------
     # These loop over the STATE_* name tuples with getattr rather than assigning

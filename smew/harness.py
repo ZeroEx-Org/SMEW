@@ -64,8 +64,13 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     "M_rock", "CaCO3", "MgCO3", "W_CaCO3", "W_MgCO3",
     # forcing carried in from the moisture, respiration and vegetation stages
     "s", "temp_soil", "v", "I", "L", "T", "Dw", "r_het", "r_aut",
+    # F2: what the positivity limiter had to do. All zero on a healthy run, so
+    # these are also the cheapest assertion that a run stayed well-posed.
+    "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
+    "clip_An", "clip_C", "clip_CaCO3", "clip_MgCO3",
+    "dt_max", "n_substeps",
 ]
-SCHEMA_2D = ["EW", "Wr", "Omega", "M_min"]           # shape (n_mineral, n_steps)
+SCHEMA_2D = ["EW", "Wr", "Omega", "M_min", "clip_M_min"]   # (n_mineral, n_steps)
 
 # Shape is set by the run, not by the time vector, so these are stored whole:
 # thinning and aggregating them would be meaningless.
@@ -279,8 +284,26 @@ def compare(ref, new, rtol=1e-12, atol=0.0):
             out.append((k, 0.0 if same else float("nan"), same))
             continue
         a, b = a.astype(float), b.astype(float)
-        d = float(np.max(np.abs(a - b))) if a.size else 0.0
-        scale = max(float(np.max(np.abs(a))) if a.size else 0.0, 1e-300)
+        if not a.size:
+            out.append((k, 0.0, True))
+            continue
+
+        # Non-finite entries need handling before any subtraction: inf - inf is
+        # nan, so a series that legitimately carries inf (dt_max is inf wherever
+        # no pool lost mass in that step) compared against itself would report
+        # nan and fail. Two entries match if they are both nan, or equal
+        # infinities of the same sign; anything else is a real difference.
+        fa, fb = np.isfinite(a), np.isfinite(b)
+        both_finite = fa & fb
+        agree_nonfinite = ((np.isnan(a) & np.isnan(b))
+                           | (~fa & ~fb & ~np.isnan(a) & ~np.isnan(b) & (a == b)))
+        if np.any(~both_finite & ~agree_nonfinite):
+            out.append((k, float("inf"), False))
+            continue
+
+        av, bv = a[both_finite], b[both_finite]
+        d = float(np.max(np.abs(av - bv))) if av.size else 0.0
+        scale = max(float(np.max(np.abs(av))) if av.size else 0.0, 1e-300)
         out.append((k, d, bool(d <= max(atol, rtol * scale))))
     return out
 
