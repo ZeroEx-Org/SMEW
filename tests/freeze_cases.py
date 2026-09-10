@@ -112,6 +112,67 @@ def build(g, n_out):
 #              a change in the model.
 VULKANEIFEL = ("Vulkaneifel", "Field C")
 
+# A synthetic case, for the branches the real ones do not reach.
+#
+# Every notebook and the Vulkaneifel sheet apply rock at t_app = 0, so tt_app is
+# 0 and the loop is post-application from its very first step. The code that
+# reads the rock geometry AT the application index therefore had no coverage at
+# all -- it was verified once, against the pre-F1 implementation, and that
+# comparison is not repeatable because the old code is gone. This fixture makes
+# it permanent. It also carries several particle-diameter classes, a measured
+# SSA (which recalibrates the fractal prefactor) and two minerals, none of which
+# the single-mineral cases exercise together.
+SYNTHETIC_CASE = "Synthetic_application"
+
+
+def synthetic_inputs(t_app=30, t_end=90, dt=1 / (24 * 6), seed=42,
+                     mineral=("forsterite", "anorthite"),
+                     d_in=None, psd_perc_in=None, SSA_in=0.5):
+    """Inputs for the synthetic case, stated explicitly like harness.example_run."""
+    import smew
+    t = np.arange(0, t_end, dt)
+    conv_mol, conv_Al = 1e6, 1e3
+    soil, Zr, rho_bulk = "loam", 0.3, 1.2e6
+    latitude, altitude = 40 * np.pi / 180, 33
+    wind = 1 * np.ones(len(t))
+    temp_air, temp_soil, temp_min, temp_max = smew.temp(
+        latitude, 13, 11, 5, Zr, t_end, dt, 1)
+    ET0 = smew.ET0(latitude, altitude, temp_air, temp_soil, temp_min, temp_max,
+                   wind, 0.25, Zr, False, t_end, dt, 1)
+    rain = smew.rain_stoc(0.25, (1.2 / 0.25) / 365, t_end, dt, seed=seed)
+    v = smew.veg(3000, 100, 3000, 0, temp_soil, dt)
+    s, s_w, s_i, I, L, T, E, Q, Irr, n = smew.moisture_balance(
+        rain, Zr, soil, ET0, v, 3000, 1, 0.5, t_end, dt)
+    SOC, r_het, r_aut, D = smew.respiration(
+        1, rho_bulk * 0.05 / 100, 10 * smew.CO2_atm(conv_mol), 1, soil, s, v,
+        3000, Zr, temp_soil, dt, conv_mol)
+    f_CEC_in = np.array([0.30, 0.15, 0.10, 0.05, 0.00, 0.40])
+    conc_in, K_CEC = smew.f_CEC_to_conc(f_CEC_in, 4, soil, conv_mol, conv_Al)
+    if d_in is None:
+        d_in = np.array([50, 100, 200, 400]) * 1e-6
+        psd_perc_in = np.array([0.25, 0.25, 0.25, 0.25])
+    return dict(n=n, s=s, L=L, T=T, I=I, v=v, k_v=3000, RAI=10, root_d=0.4e-3,
+                Zr=Zr, r_het=r_het, r_aut=r_aut, D=D, temp_soil=temp_soil,
+                pH_in=4, conc_in=conc_in, f_CEC_in=f_CEC_in, K_CEC=K_CEC,
+                CEC_tot=10 * 1e-5 * rho_bulk * Zr * conv_mol,
+                Si_in=0, CaCO3_in=0, MgCO3_in=0, M_rock_in=1000, t_app=t_app,
+                mineral=list(mineral),
+                rock_f_in=np.ones(len(mineral)) / len(mineral),
+                d_in=d_in, psd_perc_in=psd_perc_in, SSA_in=SSA_in,
+                diss_f=1.0, dt=dt, conv_Al=conv_Al, conv_mol=conv_mol,
+                keyword_add=1), t, {"rain": rain, "s": s, "v": v}
+
+
+def build_synthetic(n_out, seed=42):
+    import smew
+    kw, t, extra = synthetic_inputs(seed=seed)
+    data = smew.biogeochem_balance(**kw)
+    p = harness.collect(data, t, extra=extra, n_out=n_out)
+    merged = {k if k.startswith("_") or k == "t" else f"application.{k}": v
+              for k, v in p.items()}
+    merged["_cases"] = np.array(["application"], dtype="U32")
+    return merged
+
 
 def build_wrapper(n_out, seed=42):
     sys.path.insert(0, os.path.join(REPO, "wrappers_postprocessing"))
@@ -144,7 +205,7 @@ def main():
     a = ap.parse_args()
 
     os.chdir(REPO)
-    todo = a.only or NOTEBOOKS + [WRAPPER_CASE]
+    todo = a.only or NOTEBOOKS + [WRAPPER_CASE, SYNTHETIC_CASE]
     rc = 0
     for nb in todo:
         stem = nb.replace(".ipynb", "")
@@ -156,6 +217,8 @@ def main():
         try:
             if nb == WRAPPER_CASE:
                 p = build_wrapper(a.n_out)
+            elif nb == SYNTHETIC_CASE:
+                p = build_synthetic(a.n_out)
             else:
                 g = exec_notebook(os.path.join(REPO, "Examples", nb))
                 p = build(g, a.n_out)
