@@ -106,7 +106,26 @@ def verify_contract(data):
     """
     return [k for k in CONTRACT if k not in data]
 
-AGGS = {"min": np.min, "max": np.max, "mean": np.mean, "sum": np.sum}
+# NaN-aware, and that matters more than it looks.
+#
+# The aggregates are the whole reason thinning costs no detection power: each
+# series is decimated to n_out samples, but min/max/mean/sum are taken on the
+# FULL record first, so a perturbation between two stored samples is still
+# caught. A single NaN anywhere poisons a plain np.max and turns that guarantee
+# off silently.
+#
+# F3.1's solver series are NaN wherever no solve happened -- index 0 always, and
+# every frozen index -- so under plain np.max every one of them would have
+# aggregated to NaN on every case, and would have compared equal to NaN forever
+# after without ever testing anything. The nan-aware forms aggregate over the
+# steps that did solve, which is the quantity that was wanted.
+#
+# This is a no-op for every series that carries no NaN, which was all of them
+# before F3.1; the gate for that claim is that re-freezing moved no pre-existing
+# key. np.nansum of an all-NaN series is 0 rather than NaN, which is the one
+# place the two disagree on data we do not have.
+AGGS = {"min": np.nanmin, "max": np.nanmax,
+        "mean": np.nanmean, "sum": np.nansum}
 
 
 def provenance():

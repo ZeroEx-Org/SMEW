@@ -489,27 +489,30 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     x0 = np.array([Alk0, CO2_w0, H0, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0,
                    state.f_Al, state.f_Mg, state.f_Na, state.f_K,
                    state.f_H, state.f_Ca])
+    res_scale = _residual_scale(Alk_tot, IC_tot, p.CEC_tot, Al_tot, Mg_tot,
+                                Ca_tot, Na_tot, K_tot, nZrs)
+
     sol, info, ier, _ = fsolve(equations, x0, xtol=1e-12, full_output=True)
     errors = np.asarray(equations(sol))                    # residuals
     nfev = info["nfev"]
 
     # solution 2
     #
-    # The gate is still the incoherent absolute one: rows 1-10 are in mol or
-    # mol_c and rows 11-16 are dimensionless, so 1e-1 means a different thing on
-    # every row and on some rows means nothing at all. F3.2 replaces it with a
-    # scaled one. Kept as-is here so that F3.1 is bit-identical -- changing the
-    # gate changes which steps take rung 2, which changes results.
+    # The gate is now scaled: each residual divided by the pool its own equation
+    # balances, against one relative tolerance that therefore means the same
+    # thing on every row. It replaces `np.any(abs(errors) > 1e-1)`, which on row
+    # 16 -- the exchanger fractions summing to one -- accepted a 10 % violation
+    # of CEC closure, and on the mol rows was never binding at all.
     #
-    # Note what this means today: the ONLY thing that can trigger rung 2 is an
-    # absolute residual above 1e-1, and nothing on any benchmark case comes
-    # within ten orders of magnitude of that. So rung 2 has never fired, on any
-    # case, ever -- while the condition that should trigger it, ier != 1, is
-    # measured on 3.6 % of steps. The model pays for H0_2 every single step and
-    # has never once used it.
-    res_threshold = 1e-1
+    # What this does NOT do is change which steps take rung 2. Nothing on any
+    # benchmark case reaches either threshold, so rung 2 still never fires and
+    # the output is unchanged. The gate is now capable of firing for a defensible
+    # reason, which is the whole of F3.2; making it fire usefully is F3.6, whose
+    # real trigger is ier != 1 -- measured on 0.96 % of the suite's 1.41 M solves
+    # and, on Example, carrying residuals four orders of magnitude worse than the
+    # converged steps (median 4.7e-12 against 2.2e-16).
     rung = 1
-    if np.any(abs(errors) > res_threshold):
+    if np.any(abs(errors) / res_scale > RES_RTOL):
         x0 = np.array([Alk0, CO2_w0, H0_2, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0,
                        K0, state.f_Al, state.f_Mg, state.f_Na, state.f_K,
                        state.f_H, state.f_Ca])
@@ -517,8 +520,12 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         errors = np.asarray(equations(sol))
         nfev += info["nfev"]
         rung = 2
-        if np.any(abs(errors) > res_threshold):
-            raise ValueError("Solution not converging")
+        if np.any(abs(errors) / res_scale > RES_RTOL):
+            worst = int(np.argmax(abs(errors) / res_scale))
+            raise ValueError(
+                "Solution not converging: scaled residual %.3e on equation %d "
+                "(tolerance %.0e)" % ((abs(errors) / res_scale)[worst],
+                                      worst + 1, RES_RTOL))
 
     (Alk, CO2_w, H, R_alk, Al_w, Al, Mg, Ca, Na, K,
      f_Al, f_Mg, f_Na, f_K, f_H, f_Ca) = sol
@@ -662,6 +669,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     significant = (clipped_mol > CLIP_REL * scale_mol
                    or clipped_rock > CLIP_REL * max(abs(state.M_rock), 0.0))
     return new, {"up_act": UP_act, "errors": errors, "rung": rung,
+                 "res_scale": res_scale,
                  "ier": int(ier), "nfev": int(nfev),
                  "clipped": clipped_mol + clipped_rock,
                  "significant": bool(significant)}
@@ -675,6 +683,89 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
 # of the largest pool in the system. 1e-12 is far above double-precision noise
 # on a pool (~1e-16 relative) and far below any amount of mass worth arguing
 # about.
+# ---------------------------------------------------------------------------
+# Residual scaling
+# ---------------------------------------------------------------------------
+#
+# The sixteen residuals do not share units. Rows 1-10 are in mol or mol_c, rows
+# 11-16 are dimensionless. The original gate compared all of them against one
+# absolute number, 1e-1, which therefore meant something different on every row
+# and on some rows nothing at all: on row 16 -- the statement that the exchanger
+# fractions sum to one -- it accepted a 10 % violation of CEC closure, while on
+# a row whose natural magnitude is ~1e7 mol_c it was never binding.
+#
+# The fix is to divide each residual by a characteristic scale for its own
+# equation, so that one relative tolerance means the same thing everywhere. The
+# scale chosen here is THE POOL THE EQUATION BALANCES, which makes the scaled
+# residual read as "the fraction of this element's mass that is unaccounted
+# for" -- the same normalisation smew.ledger uses, and a statement with a
+# physical meaning rather than a numerical one.
+#
+# Every scale is a quantity known BEFORE the solve, never a function of the
+# iterate. That keeps the scale fixed while fsolve runs, which is what makes it
+# safe to fold into the residual itself later (F3.5).
+
+SCALE_FLOOR = 1e-12     # see _residual_scale
+
+# What counts as converged, as a fraction of the pool each equation balances.
+#
+# Chosen from the data, not from taste. The worst scaled residual over the whole
+# benchmark suite -- 21 case-variants, 1.41 M solves -- is 3.66e-9, on Amann's
+# fine_nocrop. 1e-7 clears that by 27x while still being six orders of magnitude
+# tighter than the 1e-1 it replaces on the dimensionless rows, and about 1e14
+# tighter on the mol rows, where the old gate was never binding at all.
+#
+# Not tighter than that, yet. Tripping this gate today sends the step to rung 2
+# and, if that also fails, RAISES -- so an over-tight gate converts a run that
+# worked into a crash. F3.6 replaces that with a ladder that degrades instead of
+# raising; tightening belongs there, once failing is survivable. res_max is in
+# the output, so how close any run came is now an observable rather than a
+# guess.
+RES_RTOL = 1e-7
+
+
+def _residual_scale(Alk_tot, IC_tot, CEC_tot, Al_tot, Mg_tot, Ca_tot, Na_tot,
+                    K_tot, nZrs):
+    """Characteristic magnitude of each of the sixteen equations.
+
+    The floor is the part that is easy to get wrong. On a forsterite run there
+    is no aluminium at all, so Al_tot sits at denormal noise -- median 5e-32 --
+    and dividing row 5's residual by it produces a "relative residual" of 1e+261.
+    That is the same trap F2 hit when sub-stepping fired on clip_Al ~ 1e-39, and
+    the same one smew.ledger's ACTIVITY_FLOOR exists to avoid: any absolute
+    threshold on a quantity that can legitimately be zero is a bug waiting to
+    happen, and so is any DENOMINATOR.
+
+    So each pool scale is floored against the largest pool in the system, at the
+    same 1e-12 relative F2 uses for CLIP_REL. The families are mixed in that max
+    (mol, mol_c and mol-conv_Al all appear), which is loose; it is defensible
+    because the floor is a noise guard rather than a normalisation, and 1e-12 of
+    the largest pool is far above float noise and far below any mass worth
+    arguing about. Rows 3 and 6 are in concentration units, so they take the
+    floored pool scale divided by the water volume rather than a floor of their
+    own.
+    """
+    pools = (abs(Alk_tot), abs(IC_tot), CEC_tot, abs(Al_tot),
+             abs(Mg_tot), abs(Ca_tot), abs(Na_tot), abs(K_tot))
+    floor = SCALE_FLOOR * max(pools)
+    Alk_s, IC_s, CEC_s, Al_s, Mg_s, Ca_s, Na_s, K_s = (
+        max(x, floor) for x in pools)
+    return np.array([
+        Alk_s,          # 1  charge balance on the exchanger + solution  [mol_c]
+        IC_s,           # 2  inorganic carbon                            [mol]
+        Alk_s / nZrs,   # 3  alkalinity definition                       [mol/l]
+        CEC_s,          # 4  R_alk definition                            [mol_c]
+        Al_s,           # 5  aluminium balance                   [mol-conv_Al]
+        Al_s / nZrs,    # 6  Al speciation                     [mol-conv_Al/l]
+        Mg_s,           # 7  magnesium balance                          [mol]
+        Ca_s,           # 8  calcium
+        Na_s,           # 9  sodium
+        K_s,            # 10 potassium
+        1.0, 1.0, 1.0, 1.0, 1.0,   # 11-15 Gaines-Thomas rows, dimensionless
+        1.0,                       # 16 sum of exchanger fractions = 1
+    ])
+
+
 CLIP_REL = 1e-12
 MAX_SUBSTEPS = 32       # 2, 4, 8, 16, 32; beyond this, accept the clip
 
@@ -749,6 +840,8 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
                 # the only value that means success, which is what matters.)
                 "ier": max(acc["ier"], d["ier"]),
                 "nfev": acc["nfev"] + d["nfev"],
+                "res_scale": d["res_scale"],
+
                 "clipped": acc["clipped"] + d["clipped"],
                 "significant": False,
             }
@@ -924,11 +1017,11 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
             solver["solver_ier"][i] = diag["ier"]
             solver["solver_nfev"][i] = diag["nfev"]
             solver["solver_rung"][i] = diag["rung"]
-            # Largest residual and the row carrying it. Absolute for now, which
-            # means it is not comparable across rows -- rows 1-10 are in mol or
-            # mol_c, rows 11-16 dimensionless. F3.2 makes this the largest
-            # SCALED residual, at which point res_row becomes meaningful.
-            _a = np.abs(diag["errors"])
+            # Largest SCALED residual and the row carrying it. Scaled is
+            # what makes these two comparable across rows and across cases:
+            # res_max reads as the fraction of a pool left unaccounted for by
+            # the worst equation, and res_row says which equation that was.
+            _a = np.abs(diag["errors"]) / diag["res_scale"]
             _j = int(np.argmax(_a))
             solver["res_max"][i] = _a[_j]
             solver["res_row"][i] = _j + 1          # 1-based, as the note numbers them
