@@ -475,21 +475,47 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     H0_2 = fsolve(eqH, state.H)[0]
 
     # solution 1
+    #
+    # full_output=True is not cosmetic. Without it fsolve's exit code is thrown
+    # away, and MINPACK's exit code 5 -- "the iteration is not making good
+    # progress", i.e. the solver stopped because it was stuck rather than
+    # because it was done -- fires on 3.6 % of steps in Example and 7.9 % in the
+    # synthetic case. SMEW has never seen one. scipy does emit a RuntimeWarning
+    # in that case, ~1900 of them on a one-year run, but only when full_output
+    # is False; requesting the code replaces a stream of warnings with a series
+    # we can count. Here those abandoned iterates happen to sit on the answer
+    # anyway (worst scaled residual measured anywhere is 1e-11), but nothing
+    # guarantees that -- it is a property of this system at these conditions.
     x0 = np.array([Alk0, CO2_w0, H0, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0,
                    state.f_Al, state.f_Mg, state.f_Na, state.f_K,
                    state.f_H, state.f_Ca])
-    sol = fsolve(equations, x0, xtol=1e-12)
+    sol, info, ier, _ = fsolve(equations, x0, xtol=1e-12, full_output=True)
     errors = np.asarray(equations(sol))                    # residuals
+    nfev = info["nfev"]
 
     # solution 2
+    #
+    # The gate is still the incoherent absolute one: rows 1-10 are in mol or
+    # mol_c and rows 11-16 are dimensionless, so 1e-1 means a different thing on
+    # every row and on some rows means nothing at all. F3.2 replaces it with a
+    # scaled one. Kept as-is here so that F3.1 is bit-identical -- changing the
+    # gate changes which steps take rung 2, which changes results.
+    #
+    # Note what this means today: the ONLY thing that can trigger rung 2 is an
+    # absolute residual above 1e-1, and nothing on any benchmark case comes
+    # within ten orders of magnitude of that. So rung 2 has never fired, on any
+    # case, ever -- while the condition that should trigger it, ier != 1, is
+    # measured on 3.6 % of steps. The model pays for H0_2 every single step and
+    # has never once used it.
     res_threshold = 1e-1
     rung = 1
     if np.any(abs(errors) > res_threshold):
         x0 = np.array([Alk0, CO2_w0, H0_2, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0,
                        K0, state.f_Al, state.f_Mg, state.f_Na, state.f_K,
                        state.f_H, state.f_Ca])
-        sol = fsolve(equations, x0, xtol=1e-14)
+        sol, info, ier, _ = fsolve(equations, x0, xtol=1e-14, full_output=True)
         errors = np.asarray(equations(sol))
+        nfev += info["nfev"]
         rung = 2
         if np.any(abs(errors) > res_threshold):
             raise ValueError("Solution not converging")
@@ -636,6 +662,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     significant = (clipped_mol > CLIP_REL * scale_mol
                    or clipped_rock > CLIP_REL * max(abs(state.M_rock), 0.0))
     return new, {"up_act": UP_act, "errors": errors, "rung": rung,
+                 "ier": int(ier), "nfev": int(nfev),
                  "clipped": clipped_mol + clipped_rock,
                  "significant": bool(significant)}
 
@@ -713,6 +740,15 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
                 "up_act": acc["up_act"],          # the first sub-step's, see below
                 "errors": d["errors"],
                 "rung": max(acc["rung"], d["rung"]),
+                # Diagnostics over a sub-divided interval report the interval,
+                # not the last sub-step: nfev is the total cost paid, and ier is
+                # the worst code seen, so one stalled sub-step is not hidden by
+                # the ones after it that went fine. (MINPACK codes are ordered
+                # 1 = converged, everything else a different way of not
+                # converging, so max() is "worst" only by convention -- but 1 is
+                # the only value that means success, which is what matters.)
+                "ier": max(acc["ier"], d["ier"]),
+                "nfev": acc["nfev"] + d["nfev"],
                 "clipped": acc["clipped"] + d["clipped"],
                 "significant": False,
             }
@@ -803,6 +839,18 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         out[k] = np.zeros(nt)
     errors = np.zeros([16, nt])
 
+    # Solver diagnostics, one entry per timestep.
+    #
+    # NaN rather than zero where no solve happened. Through a frost the model
+    # holds the chemistry rather than integrating it, so those indices never
+    # reach the solver at all -- and 0 is a meaningful MINPACK exit code, so
+    # zero-filling would make "no solve" indistinguishable from "improper input
+    # parameters". `errors` keeps its zeros, which is what that array has always
+    # held at frozen indices.
+    solver = {k: np.full(nt, np.nan)
+              for k in ("solver_ier", "solver_nfev", "solver_rung",
+                        "res_max", "res_row")}
+
     # --- initial conditions ---------------------------------------------------
     state, p, applied = _initial_state(
         p, forcing[0], pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
@@ -873,8 +921,24 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
             (out["UP_Ca"][last], out["UP_Mg"][last],
              out["UP_K"][last], out["UP_Si"][last]) = diag["up_act"]
             errors[:, i] = diag["errors"]
+            solver["solver_ier"][i] = diag["ier"]
+            solver["solver_nfev"][i] = diag["nfev"]
+            solver["solver_rung"][i] = diag["rung"]
+            # Largest residual and the row carrying it. Absolute for now, which
+            # means it is not comparable across rows -- rows 1-10 are in mol or
+            # mol_c, rows 11-16 dimensionless. F3.2 makes this the largest
+            # SCALED residual, at which point res_row becomes meaningful.
+            _a = np.abs(diag["errors"])
+            _j = int(np.argmax(_a))
+            solver["res_max"][i] = _a[_j]
+            solver["res_row"][i] = _j + 1          # 1-based, as the note numbers them
 
             prev_state, prev_idx = new, i
+
+    _solved = np.isfinite(solver["solver_ier"])
+    n_solve = int(_solved.sum())
+    n_stall = int((solver["solver_ier"][_solved] != 1).sum())
+    nfev_total = float(np.nansum(solver["solver_nfev"]))
 
     # The output contract, stated rather than dumped.
     #
@@ -939,4 +1003,27 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         # non-negative [d]. n_substeps: how many sub-intervals the step needed
         # (1 = none, 0 = sub-dividing failed and the clamp was used).
         "dt_max": out["dt_max"], "n_substeps": out["n_substeps"],
+        # --- F3.1 solver diagnostics ---
+        # errors is [16, nt]: the residual of every equation at every timestep,
+        # which the model has always computed and always discarded. The rest are
+        # per-timestep, NaN where a frost meant no solve happened:
+        #   solver_ier   MINPACK exit code. 1 = converged; 5 = "not making good
+        #                progress", the solver giving up. Anything but 1 is a
+        #                step whose answer nothing has checked.
+        #   solver_nfev  residual evaluations spent, summed over sub-steps.
+        #   solver_rung  which fallback rung produced the answer.
+        #   res_max      largest |residual| and res_row the equation carrying it.
+        "errors": errors,
+        # Run-level solver totals, computed on the FULL record before anything
+        # thins it. The per-step series above are decimated by harness.collect
+        # and go NaN at frozen indices, so neither the stall count nor the cost
+        # is recoverable from them; these three are. n_stall is the headline
+        # number -- steps whose answer the solver itself declined to vouch for.
+        "n_solve": float(n_solve), "n_stall": float(n_stall),
+        "nfev_total": float(nfev_total),
+        "solver_ier": solver["solver_ier"],
+        "solver_nfev": solver["solver_nfev"],
+        "solver_rung": solver["solver_rung"],
+        "res_max": solver["res_max"],
+        "res_row": solver["res_row"],
     }
