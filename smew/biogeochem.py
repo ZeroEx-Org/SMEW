@@ -12,7 +12,7 @@ from smew import weathering_kinec
 from smew.state import (SoilParams, SoilState, StepForcing,
                         STATE_1D, STATE_MIN, STATE_PSD)
 from numba import njit
-from scipy.optimize import fsolve, root
+from scipy.optimize import fsolve, least_squares, root
 #minimize, least_squares, newton_krylov, broyden1, root, broyden2
 
 @njit
@@ -811,10 +811,6 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     K0 = (K_tot - state.f_K * p.CEC_tot) / nZrs
     H0 = state.H
 
-    def eqH(pv):
-        return _eqH_numba(pv, now.k1, now.k2, CO2_w0, now.k_w, Alk0)
-    H0_2 = fsolve(eqH, state.H)[0]
-
     # solution 1
     #
     # full_output=True is not cosmetic. Without it fsolve's exit code is thrown
@@ -846,26 +842,43 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     nfev = sol_r.nfev
     njev = sol_r.njev
 
-    # solution 2
+    # --- the ladder ----------------------------------------------------------
     #
-    # The gate is now scaled: each residual divided by the pool its own equation
-    # balances, against one relative tolerance that therefore means the same
-    # thing on every row. It replaces `np.any(abs(errors) > 1e-1)`, which on row
-    # 16 -- the exchanger fractions summing to one -- accepted a 10 % violation
-    # of CEC closure, and on the mol rows was never binding at all.
+    # F3.1 measured the trigger that was missing, and F3.2 could not yet use it:
+    # MINPACK's own exit code. The gate was the residual alone, so a solver that
+    # stopped because it was stuck -- 11 625 times across the suite before F3.4 --
+    # was accepted in silence provided the iterate it abandoned happened to sit
+    # near the answer. Both conditions route to the next rung now.
     #
-    # What this does NOT do is change which steps take rung 2. Nothing on any
-    # benchmark case reaches either threshold, so rung 2 still never fires and
-    # the output is unchanged. The gate is now capable of firing for a defensible
-    # reason, which is the whole of F3.2; making it fire usefully is F3.6, whose
-    # real trigger is ier != 1 -- measured on 0.96 % of the suite's 1.41 M solves
-    # and, on Example, carrying residuals four orders of magnitude worse than the
-    # converged steps (median 4.7e-12 against 2.2e-16).
+    # Rung 2 had never fired once in the model's history, before or after F3.5,
+    # because the only thing that could trigger it was an absolute residual
+    # nothing came within ten orders of magnitude of.
+
+    def _resid_bad(e):
+        return bool(np.any(abs(e) / res_scale > RES_RTOL))
+
+    def _bad(e, code):
+        return code not in _IER_OK or _resid_bad(e)
+
     rung = 1
-    if np.any(abs(errors) / res_scale > RES_RTOL):
+    if _bad(errors, ier):
+        # Rung 2 -- the alternative pH guess, from the carbonate system alone.
+        #
+        # Solved HERE and not once per timestep. Until F3.6 `H0_2` cost a full
+        # 1-D fsolve on every step -- 52 559 a year on Example, ~5 % of the
+        # run -- to seed a rung that had never been taken.
+        def eqH(pv):
+            return _eqH_numba(pv, now.k1, now.k2, CO2_w0, now.k_w, Alk0)
+        H0_2 = fsolve(eqH, state.H)[0]
+
+        # Same xtol as rung 1. The rung differs in its STARTING POINT, which
+        # is the whole idea of it; the 1e-14 it inherited made it differ in
+        # tolerance too, and that tolerance is below what a double can deliver
+        # as a relative step -- measured, it made MINPACK return code 3 on
+        # 4 017 of 4 319 calls while the residuals were 1.5e-15.
         q0 = np.array([CO2_w0, H0_2, Al_w0, Mg0, Ca0, Na0, K0, state.f_Ca])
         sol_r = root(equations8log, _y_from_q_numba(q0), jac=jacobian8log,
-                     method="hybr", options={"xtol": 1e-14})
+                     method="hybr", options={"xtol": 1e-12})
         q = _q_from_y_numba(sol_r.x)
         ier = sol_r.status
         sol = expand8(q)
@@ -873,12 +886,69 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         nfev += sol_r.nfev
         njev += sol_r.njev
         rung = 2
-        if np.any(abs(errors) / res_scale > RES_RTOL):
-            worst = int(np.argmax(abs(errors) / res_scale))
-            raise ValueError(
-                "Solution not converging: scaled residual %.3e on equation %d "
-                "(tolerance %.0e)" % ((abs(errors) / res_scale)[worst],
-                                      worst + 1, RES_RTOL))
+
+    if _bad(errors, ier):
+        # Rung 3 -- least squares with bounds, which cannot fail to return
+        # something, and minimises the residual rather than requiring a root.
+        #
+        # The bounds are nearly free in solver variables: six of the eight are
+        # logs, so positivity is already structural and their bounds are
+        # infinite. Only two are real constraints -- Al_w is carried linearly
+        # (see F3.5) and is a concentration, so it is bounded below by zero, not
+        # by a floor; and f_Ca is an equivalent fraction, so ln f_Ca <= 0.
+        lo = np.array([-np.inf, -np.inf, 0.0, -np.inf, -np.inf, -np.inf,
+                       -np.inf, -np.inf])
+        hi = np.array([np.inf, np.inf, np.inf, np.inf, np.inf, np.inf,
+                       np.inf, 0.0])
+        # A starting point outside its own bounds is a starting point, not a
+        # result: clipping it decides nothing about the answer. Al_w0 is the one
+        # that needs it -- it is negative on 10 of the suite's 1.36 M solves,
+        # always on a feedstock with no aluminium in it.
+        y0 = np.clip(_y_from_q_numba(q0), lo, hi)
+        ls = least_squares(equations8log, y0, jac=jacobian8log, bounds=(lo, hi),
+                           method="trf", xtol=1e-14, ftol=1e-14, gtol=1e-14)
+        nfev += ls.nfev
+        njev += ls.njev
+
+        # least_squares minimises a SUM of squares, so it is free to trade one
+        # row off against the rest -- and the row it gives up is whichever
+        # contributes least, which on an Al-free feedstock is equation 5. Over
+        # 400 cold starts it leaves that row at 6.9e-08 (median AND worst, so it
+        # is systematic, not occasional) while every other row sits at machine
+        # precision. x_scale='jac' changes nothing. A single Newton solve from
+        # its answer does: 4.8e-16 median, 1.1e-15 worst.
+        #
+        # So rung 3 is two moves, not one -- least_squares to find the basin,
+        # Newton to land in it. The cost is irrelevant: this rung does not run.
+        pol = root(equations8log, ls.x, jac=jacobian8log, method="hybr",
+                   options={"xtol": 1e-12})
+        nfev += pol.nfev
+        njev += pol.njev
+
+        # Take the best of the three, scored the same way the gate scores them.
+        # least_squares returns its best point whether or not that point is a
+        # root, so "it returned" is not evidence of anything.
+        best = np.max(abs(errors) / res_scale)
+        for _y in (ls.x, pol.x):
+            _q = _q_from_y_numba(_y)
+            _sol = expand8(_q)
+            _e = np.asarray(equations(_sol))
+            _s = np.max(abs(_e) / res_scale)
+            if _s < best:
+                best, q, sol, errors = _s, _q, _sol, _e
+        rung = 3
+        # From rung 3 on, `ier` is normalised: 1 if the answer met the gate and
+        # 0 if it did not. least_squares' status codes do not share MINPACK's
+        # convention, and `n_stall` counts ier != 1, so passing them through
+        # would silently change what that number means.
+        ier = 0 if _resid_bad(errors) else 1
+
+    # Rung 4 is sub-stepping the interval, and it lives in step() -- F2 already
+    # has that machinery and a second copy would be a second thing to get wrong.
+    # Rung 5 is raising, also in step(), once sub-dividing has been tried. So
+    # this returns the failure rather than raising on it: _step_once is one
+    # Euler step and is not the place that decides an interval is hopeless.
+    unconverged = bool(_bad(errors, ier))
 
     (Alk, CO2_w, H, R_alk, Al_w, Al, Mg, Ca, Na, K,
      f_Al, f_Mg, f_Na, f_K, f_H, f_Ca) = sol
@@ -1024,6 +1094,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     return new, {"up_act": UP_act, "errors": errors, "rung": rung,
                  "res_scale": res_scale,
                  "ier": int(ier), "nfev": int(nfev), "njev": int(njev),
+                 "unconverged": unconverged,
                  "clipped": clipped_mol + clipped_rock,
                  "significant": bool(significant)}
 
@@ -1068,13 +1139,26 @@ SCALE_FLOOR = 1e-12     # see _residual_scale
 # tighter than the 1e-1 it replaces on the dimensionless rows, and about 1e14
 # tighter on the mol rows, where the old gate was never binding at all.
 #
-# Not tighter than that, yet. Tripping this gate today sends the step to rung 2
-# and, if that also fails, RAISES -- so an over-tight gate converts a run that
-# worked into a crash. F3.6 replaces that with a ladder that degrades instead of
-# raising; tightening belongs there, once failing is survivable. res_max is in
-# the output, so how close any run came is now an observable rather than a
-# guess.
-RES_RTOL = 1e-7
+# F3.6 tightened it from 1e-7 to 1e-9, which is the value F3.2 originally
+# proposed and had to abandon. Two things had to change first. The residuals
+# themselves: the suite's worst was 3.66e-09 under the 16-equation system, which
+# 1e-9 would have tripped on three case-variants, and is 2.89e-13 now -- so 1e-9
+# clears the measured worst by ~3 500x instead of failing it. And the
+# consequence of tripping: it used to mean rung 2 and then a crash, so an
+# over-tight gate turned a working run into a failure. It now means the next
+# rung, and the last rung is the one that raises.
+# MINPACK exit codes the ladder treats as "this rung is done". 1 is a clean
+# convergence. 3 is "xtol is too small, no further improvement in x is
+# possible" -- a statement about how far the SOLUTION VECTOR can still move in
+# double precision, not about the residual, which is checked separately and on
+# its own terms. Reading 3 as failure sends converged steps down the ladder:
+# measured, it did so on 93 % of them.
+#
+# Everything else -- 2 (out of evaluations), 4 and 5 (not making progress) --
+# is a real failure and escalates.
+_IER_OK = (1, 3)
+
+RES_RTOL = 1e-9
 
 
 def _residual_scale(Alk_tot, IC_tot, CEC_tot, Al_tot, Mg_tot, Ca_tot, Na_tot,
@@ -1123,6 +1207,20 @@ CLIP_REL = 1e-12
 MAX_SUBSTEPS = 32       # 2, 4, 8, 16, 32; beyond this, accept the clip
 
 
+def _unconverged_msg(diag, dt, extra=""):
+    """Say which equation failed and by how much, not just that something did.
+
+    `res_max` and `res_row` are derived in biogeochem_balance rather than
+    carried in diag, so they are rebuilt here from the two things that are:
+    the sixteen residuals and the scale vector they are judged against.
+    """
+    scaled = np.abs(np.asarray(diag["errors"])) / diag["res_scale"]
+    j = int(np.argmax(scaled))
+    return ("Solver did not converge after rung %d: scaled residual %.3e on "
+            "equation %d (tolerance %.0e), MINPACK exit code %d, dt = %g d%s"
+            % (diag["rung"], scaled[j], j + 1, RES_RTOL, diag["ier"], dt, extra))
+
+
 def _lerp_forcing(a, b, f):
     """Forcing part-way through an interval, for sub-stepping.
 
@@ -1165,8 +1263,19 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
     Returns (new_state, diagnostics).
     """
     new, diag = _step_once(state, params, now, prev, dt, post_application, rock_now)
-    if not diag["significant"] or max_substeps <= 1:
+    if (not diag["significant"] and not diag["unconverged"]) or max_substeps <= 1:
+        if diag["unconverged"]:
+            raise ValueError(_unconverged_msg(diag, dt))
         return new, diag
+
+    # Sub-stepping now has two triggers. F2's is a pool that went negative;
+    # F3.6 adds a solve that did not converge, on the same reasoning -- a
+    # shorter interval is a smaller change in the totals and therefore a
+    # starting point closer to its own answer. Both use this one loop, and both
+    # land in the ledger the same way, through n_substeps: smew.ledger already
+    # declines to gate a run containing a sub-divided interval, and a
+    # solver-triggered one must not quietly escape that.
+    solver_triggered = diag["unconverged"]
 
     n = 2
     while n <= max_substeps:
@@ -1198,20 +1307,35 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 
                 "clipped": acc["clipped"] + d["clipped"],
                 "significant": False,
+                "unconverged": False,
             }
-            if d["significant"]:
+            if d["significant"] or d["unconverged"]:
                 ok = False
                 break
         if ok:
             st.n_substeps = float(n)
             st.dt_max = new.dt_max
             acc["substeps"] = n
+            # An interval that only converged because it was sub-divided is
+            # rung 4, however easily each sub-step then went. Reporting the
+            # sub-steps' own rung would hide the one fact worth recording.
+            if solver_triggered:
+                acc["rung"] = max(acc["rung"], 4)
             return st, acc
         n *= 2
 
-    # Sub-dividing did not rescue it. Keep the clamped full step, which at least
-    # records what it destroyed, and let the caller see n_substeps == 0 as the
-    # marker that the limiter was reached rather than avoided.
+    # Rung 5. Sub-dividing did not rescue it.
+    #
+    # For a clipped pool, keeping the clamped full step is the established
+    # behaviour: it records what it destroyed and n_substeps == 0 marks it. For
+    # a solve that will not converge there is nothing to keep -- the numbers are
+    # not a solution to anything -- so this raises. TC_SMEW prints and carries
+    # on at the end of its ladder, which is worse than raising, because it
+    # produces output that looks like a result.
+    if diag["unconverged"]:
+        raise ValueError(_unconverged_msg(
+            diag, dt, ", and sub-dividing it into %d did not help"
+            % max_substeps))
     new.n_substeps = 0.0
     diag["substeps"] = 0
     return new, diag
