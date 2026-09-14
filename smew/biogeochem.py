@@ -706,12 +706,30 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # stated before.
     clip_Ca = clip_Mg = clip_K = clip_Na = 0.0
     clip_Al = clip_Si = clip_An = clip_C = 0.0
+    #
+    # `_pool > 0.0` is not a strong enough test, and F3.5 is what showed it.
+    # On a forsterite feedstock there is no aluminium, so `Al_tot` is float
+    # noise -- 1e-56 -- and it still satisfies `> 0`. Every one of the two
+    # hundred smallest dt_max values on `Example` is set by that pool. The
+    # number F2 introduced as "the model's documented stable dt" was therefore,
+    # on any Al-free run, a statement about a pool that is not there: it moved
+    # by six orders of magnitude (0.023 d -> 4.3e-08 d) purely because F3.5's
+    # last bits landed differently, while every real pool moved by ~1e-12.
+    #
+    # The fix is the floor this repo already uses in three other places --
+    # F2's CLIP_REL, the ledger's ACTIVITY_FLOOR, F3.2's SCALE_FLOOR: a pool is
+    # only worth limiting the timestep if it is a pool at all, judged relative
+    # to the largest one in the system rather than against an absolute constant.
+    # Never gate on, and never divide by, a quantity that can legitimately be
+    # zero.
+    _pools = ((state.Ca_tot, Ca_tot), (state.Mg_tot, Mg_tot),
+              (state.K_tot, K_tot), (state.Na_tot, Na_tot),
+              (state.Al_tot, Al_tot), (state.Si_tot, Si_tot),
+              (state.An_tot, An_tot), (state.IC_tot, IC_tot))
+    _floor = SCALE_FLOOR * max(abs(_p) for _p, _ in _pools)
     dt_max = float("inf")
-    for _pool, _tent in ((state.Ca_tot, Ca_tot), (state.Mg_tot, Mg_tot),
-                         (state.K_tot, K_tot), (state.Na_tot, Na_tot),
-                         (state.Al_tot, Al_tot), (state.Si_tot, Si_tot),
-                         (state.An_tot, An_tot), (state.IC_tot, IC_tot)):
-        if _tent < _pool and _pool > 0.0:
+    for _pool, _tent in _pools:
+        if _tent < _pool and _pool > _floor:
             _lim = dt * _pool / (_pool - _tent)
             if _lim < dt_max:
                 dt_max = _lim
