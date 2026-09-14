@@ -12,7 +12,7 @@ from smew import weathering_kinec
 from smew.state import (SoilParams, SoilState, StepForcing,
                         STATE_1D, STATE_MIN, STATE_PSD)
 from numba import njit
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, root
 #minimize, least_squares, newton_krylov, broyden1, root, broyden2
 
 @njit
@@ -156,6 +156,208 @@ def _biogeochem_equations_8_numba(
         1-(f_Ca+f_Al+f_Mg+f_Na+f_K+f_H),                                 # 16
     )
 
+
+# ---------------------------------------------------------------------------
+# The same eight equations in log variables, with their analytic Jacobian
+# ---------------------------------------------------------------------------
+#
+# Three changes at once, because each one makes the next cheap and all three
+# rewrite the same function:
+#
+#   1. Solve for ln of seven of the eight unknowns. They span forty orders of
+#      magnitude in the model's own units (Al_w ~1e-41 on an Al-free feedstock
+#      against CEC_tot ~1e7); the log enforces positivity structurally rather
+#      than by patching the answer, and it turns every mass-action term into a
+#      monomial, which is why the Jacobian below is mostly multiplication by
+#      small integers.
+#
+#      Al_w is the exception and stays LINEAR. Not a compromise -- a measurement:
+#      across the suite's 1 359 727 solves, `Al_tot` is EXACTLY zero on 9 of
+#      them, and on those the correct Al_w is exactly zero too. ln cannot
+#      represent that. The only way to log it is to floor it, and a floor on a
+#      quantity that is legitimately zero is the trap F2 hit on clip_Al ~1e-39
+#      and F3.3 hit twice more. So the variable that most wants log conditioning
+#      is the one variable that cannot have it.
+#
+#      (The plan predicted seven logs with f_Ca as the odd one out. It is seven,
+#      but f_Ca is not the exception: measured, f_Ca lives in [0.050, 0.930],
+#      comfortably inside the interval a logit exists to protect.)
+#
+#   2. Fold F3.2's row scaling into the residual, not just the gate. F3.2 kept
+#      it out because scaling changes the iterates; this rewrite changes them
+#      anyway, so it is the cheapest place to do it.
+#
+#   3. Supply the Jacobian. fsolve was spending 9 of every ~15 residual
+#      evaluations building one by forward differences.
+#
+# If a future case pushes f_Ca toward 1, the logit is the line to revisit.
+#
+# The chain rule is nearly free in log variables: d r / d(ln x) = x * dr/dx, and
+# every term below is a product of powers of the unknowns, so its log-derivative
+# is (its own exponent) x (the term itself). That is the whole derivation --
+# there is no term in this system whose log-derivative needs more than a
+# multiplication, except H, which appears both as a monomial and inside the
+# aluminium denominator D(H).
+
+
+@njit
+def _q_from_y_numba(y):
+    """Solver variables -> the eight unknowns.
+
+    Seven are logs; slot 2 (Al_w) is carried linearly, for the reason above.
+    Short, but it is the definition the Jacobian is differentiated against, so
+    it is written once and used by both.
+    """
+    q = np.empty(8)
+    q[0] = np.exp(y[0])
+    q[1] = np.exp(y[1])
+    q[2] = y[2]                      # Al_w, linear
+    q[3] = np.exp(y[3])
+    q[4] = np.exp(y[4])
+    q[5] = np.exp(y[5])
+    q[6] = np.exp(y[6])
+    q[7] = np.exp(y[7])
+    return q
+
+
+@njit
+def _y_from_q_numba(q):
+    """The inverse. Al_w passes through; everything else takes a log."""
+    y = np.empty(8)
+    y[0] = np.log(q[0])
+    y[1] = np.log(q[1])
+    y[2] = q[2]
+    y[3] = np.log(q[3])
+    y[4] = np.log(q[4])
+    y[5] = np.log(q[5])
+    y[6] = np.log(q[6])
+    y[7] = np.log(q[7])
+    return y
+
+
+@njit
+def _biogeochem_equations_8log_numba(
+        y, scale8, Alk_tot, n, Zr, s, IC_tot, k1, k2, k_H, k_w, CEC_tot,
+        conv_Al, Al_tot, K1, K2, K3, K4, Mg_tot, Ca_tot, Na_tot, K_tot,
+        K_Ca_Al, K_Ca_Mg, K_Ca_Na, K_Ca_K, K_Ca_H
+):
+    """The eight residuals, in solver variables, each divided by its own scale."""
+    q = _q_from_y_numba(y)
+    r = _biogeochem_equations_8_numba(
+        q, Alk_tot, n, Zr, s, IC_tot, k1, k2, k_H, k_w, CEC_tot, conv_Al,
+        Al_tot, K1, K2, K3, K4, Mg_tot, Ca_tot, Na_tot, K_tot, K_Ca_Al,
+        K_Ca_Mg, K_Ca_Na, K_Ca_K, K_Ca_H)
+    out = np.empty(8)
+    for i in range(8):
+        out[i] = r[i] / scale8[i]
+    return out
+
+
+@njit
+def _jacobian_8log_numba(
+        y, scale8, Alk_tot, n, Zr, s, IC_tot, k1, k2, k_H, k_w, CEC_tot,
+        conv_Al, Al_tot, K1, K2, K3, K4, Mg_tot, Ca_tot, Na_tot, K_tot,
+        K_Ca_Al, K_Ca_Mg, K_Ca_Na, K_Ca_K, K_Ca_H
+):
+    """d(scaled residual) / d(solver variable), 8x8, by hand.
+
+    Column order matches the unknowns: CO2_w, H, Al_w, Mg, Ca, Na, K, f_Ca.
+    Row order matches the residual: equations 1, 2, 5, 7, 8, 9, 10, 16 of the
+    original sixteen.
+
+    Derived term by term rather than by norm-checking the result, and gated
+    entry by entry against central differences in tests/check_jacobian.py -- a
+    norm hides a wrong entry in a small row, which is exactly the failure mode
+    a hand-differentiated Jacobian has.
+    """
+    q = _q_from_y_numba(y)
+    CO2_w = q[0]; H = q[1]; Al_w = q[2]
+    Mg = q[3]; Ca = q[4]; Na = q[5]; K = q[6]; f_Ca = q[7]
+
+    N = n * Zr * s * 1000                  # water volume factor [l]
+    M = n * Zr * 1000
+
+    # --- the carbonate terms of Alk, each a monomial in CO2_w and H ----------
+    A1 = k1 * CO2_w / H                    # HCO3-      d/dlnH = -A1
+    A2 = 2 * k1 * k2 * CO2_w / (H ** 2)    # 2*CO3--    d/dlnH = -2*A2
+    A4 = k_w / H                           # OH-        d/dlnH = -A4
+    dAlk_du = A1 + A2                      # d Alk / d ln CO2_w
+    dAlk_dh = -A1 - 2 * A2 - H - A4        # d Alk / d ln H
+
+    # --- the aluminium ladder ------------------------------------------------
+    # D(H) is the only non-monomial in the system, so its H-derivative is the
+    # only one that is not an integer multiple of the term itself.
+    D = H ** 4 + H ** 3 * K1 + H ** 2 * K1 * K2 + H * K1 * K2 * K3 + K1 * K2 * K3 * K4
+    dD = 4 * H ** 3 + 3 * H ** 2 * K1 + 2 * H * K1 * K2 + K1 * K2 * K3
+    Al = (H ** 4 / D) * Al_w
+    w = 4 - H * dD / D                     # d ln(H^4/D) / d ln H
+
+    # --- the exchanger fractions, all monomials ------------------------------
+    # f_Al is proportional to Al_w, and column 2 differentiates w.r.t. Al_w
+    # itself rather than its log. Carrying the ratio avoids ever dividing by
+    # Al_w, which is exactly zero on the nine solves that made it linear.
+    fAl_per_Alw = (H ** 4 / D) / conv_Al * (f_Ca ** 3 / (K_Ca_Al * Ca ** 3)) ** (1 / 2)
+    f_Al = fAl_per_Alw * Al_w
+    f_Mg = Mg * (f_Ca / (K_Ca_Mg * Ca))
+    f_Na = Na * (f_Ca / (K_Ca_Na * Ca)) ** (1 / 2)
+    f_K = K * (f_Ca / (K_Ca_K * Ca)) ** (1 / 2)
+    f_H = H * (f_Ca / (K_Ca_H * Ca)) ** (1 / 2)
+
+    J = np.zeros((8, 8))
+
+    # row 1: (Alk_tot - R_alk) - Alk*N,  R_alk = (f_Mg+f_Ca+f_Na+f_K)*CEC_tot
+    J[0, 0] = -N * dAlk_du
+    J[0, 1] = -N * dAlk_dh
+    J[0, 3] = -CEC_tot * f_Mg
+    J[0, 4] = CEC_tot * (f_Mg + 0.5 * f_Na + 0.5 * f_K)
+    J[0, 5] = -CEC_tot * f_Na
+    J[0, 6] = -CEC_tot * f_K
+    J[0, 7] = -CEC_tot * (f_Mg + f_Ca + 0.5 * f_Na + 0.5 * f_K)
+
+    # row 2: IC_tot - CO2_w*S(H)*M
+    S = s * (1 + k1 / H + k2 * k1 / (H ** 2)) + (1 - s) / k_H
+    J[1, 0] = -CO2_w * S * M
+    J[1, 1] = CO2_w * M * s * (k1 / H + 2 * k2 * k1 / (H ** 2))
+
+    # row 5: Al_w*N + (f_Al/3)*CEC_tot*conv_Al - Al_tot
+    G = CEC_tot * conv_Al / 3
+    J[2, 1] = G * f_Al * w
+    J[2, 2] = N + G * fAl_per_Alw          # d/d Al_w, not d/d ln Al_w
+    J[2, 4] = -1.5 * G * f_Al
+    J[2, 7] = 1.5 * G * f_Al
+
+    # row 7: Mg*N + f_Mg/2*CEC_tot - Mg_tot
+    J[3, 3] = Mg * N + 0.5 * CEC_tot * f_Mg
+    J[3, 4] = -0.5 * CEC_tot * f_Mg
+    J[3, 7] = 0.5 * CEC_tot * f_Mg
+
+    # row 8: Ca*N + f_Ca/2*CEC_tot - Ca_tot
+    J[4, 4] = Ca * N
+    J[4, 7] = 0.5 * CEC_tot * f_Ca
+
+    # row 9: Na*N + f_Na*CEC_tot - Na_tot
+    J[5, 4] = -0.5 * CEC_tot * f_Na
+    J[5, 5] = Na * N + CEC_tot * f_Na
+    J[5, 7] = 0.5 * CEC_tot * f_Na
+
+    # row 10: K*N + f_K*CEC_tot - K_tot
+    J[6, 4] = -0.5 * CEC_tot * f_K
+    J[6, 6] = K * N + CEC_tot * f_K
+    J[6, 7] = 0.5 * CEC_tot * f_K
+
+    # row 16: 1 - (f_Ca + f_Al + f_Mg + f_Na + f_K + f_H)
+    J[7, 1] = -(f_Al * w + f_H)
+    J[7, 2] = -fAl_per_Alw                 # d/d Al_w
+    J[7, 3] = -f_Mg
+    J[7, 4] = 1.5 * f_Al + f_Mg + 0.5 * f_Na + 0.5 * f_K + 0.5 * f_H
+    J[7, 5] = -f_Na
+    J[7, 6] = -f_K
+    J[7, 7] = -(f_Ca + 1.5 * f_Al + f_Mg + 0.5 * f_Na + 0.5 * f_K + 0.5 * f_H)
+
+    for i in range(8):
+        for j in range(8):
+            J[i, j] /= scale8[i]
+    return J
 
 # ---------------------------------------------------------------------------
 # Resolving the constants
@@ -562,6 +764,12 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     def equations8(qv):
         return _biogeochem_equations_8_numba(qv, *_args)
 
+    def equations8log(yv):
+        return _biogeochem_equations_8log_numba(yv, res_scale8, *_args)
+
+    def jacobian8log(yv):
+        return _jacobian_8log_numba(yv, res_scale8, *_args)
+
     def expand8(qv):
         return _expand_8_numba(qv, now.k1, now.k2, now.k_w, p.CEC_tot,
                                p.conv_Al, p.K1, p.K2, p.K3, p.K4, p.K_Ca_Al,
@@ -604,14 +812,21 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     q0 = np.array([CO2_w0, H0, Al_w0, Mg0, Ca0, Na0, K0, state.f_Ca])
     res_scale = _residual_scale(Alk_tot, IC_tot, p.CEC_tot, Al_tot, Mg_tot,
                                 Ca_tot, Na_tot, K_tot, nZrs)
+    # The eight retained rows of F3.2's sixteen scales, so there is one scale
+    # vector in the model and not two that can drift apart.
+    res_scale8 = res_scale[[0, 1, 4, 6, 7, 8, 9, 15]]
 
-    # nfev counts evaluations of the EIGHT-equation residual from here on. It is
-    # not comparable with the numbers F3.1 reported, which were sixteen-equation
-    # evaluations: a forward-difference Jacobian is now 9 of them rather than 17.
-    q, info, ier, _ = fsolve(equations8, q0, xtol=1e-12, full_output=True)
+    # nfev counts evaluations of the EIGHT-equation residual, and from F3.5 on
+    # the Jacobian is analytic, so it no longer contains hidden Jacobian builds.
+    # njev counts those separately. Neither is comparable with F3.1's numbers.
+    sol_r = root(equations8log, _y_from_q_numba(q0), jac=jacobian8log,
+                 method="hybr", options={"xtol": 1e-12})
+    q = _q_from_y_numba(sol_r.x)
+    ier = sol_r.status
     sol = expand8(q)
     errors = np.asarray(equations(sol))                    # residuals, all 16
-    nfev = info["nfev"]
+    nfev = sol_r.nfev
+    njev = sol_r.njev
 
     # solution 2
     #
@@ -631,10 +846,14 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     rung = 1
     if np.any(abs(errors) / res_scale > RES_RTOL):
         q0 = np.array([CO2_w0, H0_2, Al_w0, Mg0, Ca0, Na0, K0, state.f_Ca])
-        q, info, ier, _ = fsolve(equations8, q0, xtol=1e-14, full_output=True)
+        sol_r = root(equations8log, _y_from_q_numba(q0), jac=jacobian8log,
+                     method="hybr", options={"xtol": 1e-14})
+        q = _q_from_y_numba(sol_r.x)
+        ier = sol_r.status
         sol = expand8(q)
         errors = np.asarray(equations(sol))
-        nfev += info["nfev"]
+        nfev += sol_r.nfev
+        njev += sol_r.njev
         rung = 2
         if np.any(abs(errors) / res_scale > RES_RTOL):
             worst = int(np.argmax(abs(errors) / res_scale))
@@ -786,7 +1005,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
                    or clipped_rock > CLIP_REL * max(abs(state.M_rock), 0.0))
     return new, {"up_act": UP_act, "errors": errors, "rung": rung,
                  "res_scale": res_scale,
-                 "ier": int(ier), "nfev": int(nfev),
+                 "ier": int(ier), "nfev": int(nfev), "njev": int(njev),
                  "clipped": clipped_mol + clipped_rock,
                  "significant": bool(significant)}
 
@@ -956,6 +1175,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
                 # the only value that means success, which is what matters.)
                 "ier": max(acc["ier"], d["ier"]),
                 "nfev": acc["nfev"] + d["nfev"],
+                "njev": acc["njev"] + d["njev"],
                 "res_scale": d["res_scale"],
 
                 "clipped": acc["clipped"] + d["clipped"],
@@ -1057,7 +1277,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     # parameters". `errors` keeps its zeros, which is what that array has always
     # held at frozen indices.
     solver = {k: np.full(nt, np.nan)
-              for k in ("solver_ier", "solver_nfev", "solver_rung",
+              for k in ("solver_ier", "solver_nfev", "solver_njev",
+                        "solver_rung",
                         "res_max", "res_row")}
 
     # --- initial conditions ---------------------------------------------------
@@ -1132,6 +1353,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
             errors[:, i] = diag["errors"]
             solver["solver_ier"][i] = diag["ier"]
             solver["solver_nfev"][i] = diag["nfev"]
+            solver["solver_njev"][i] = diag["njev"]
             solver["solver_rung"][i] = diag["rung"]
             # Largest SCALED residual and the row carrying it. Scaled is
             # what makes these two comparable across rows and across cases:
@@ -1148,6 +1370,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     n_solve = int(_solved.sum())
     n_stall = int((solver["solver_ier"][_solved] != 1).sum())
     nfev_total = float(np.nansum(solver["solver_nfev"]))
+    njev_total = float(np.nansum(solver["solver_njev"]))
 
     # The output contract, stated rather than dumped.
     #
@@ -1229,7 +1452,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         # is recoverable from them; these three are. n_stall is the headline
         # number -- steps whose answer the solver itself declined to vouch for.
         "n_solve": float(n_solve), "n_stall": float(n_stall),
-        "nfev_total": float(nfev_total),
+        "nfev_total": float(nfev_total), "njev_total": float(njev_total),
         "solver_ier": solver["solver_ier"],
         "solver_nfev": solver["solver_nfev"],
         "solver_rung": solver["solver_rung"],

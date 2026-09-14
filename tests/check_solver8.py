@@ -53,6 +53,15 @@ import smew.biogeochem as bg                                       # noqa: E402
 
 EPS = np.finfo(float).eps
 ULP_TOL = 8          # (a): a few ulp, with room for a compiler
+# Which total each unknown is a statement about, by index into the 25-arg list.
+# An unknown whose total is below F3.2's relative floor is not compared: there
+# is no aluminium on a forsterite feedstock, so its two answers are two
+# different roundings of noise and their relative difference is ~1. This is the
+# same rule _residual_scale already applies to the residual rows, reusing the
+# same constant rather than inventing a second one.
+TOTAL_OF = {0: 4, 2: 11, 3: 16, 4: 17, 5: 18, 6: 19, 7: 9}   # H (1) always active
+POOLS = [0, 4, 9, 11, 16, 17, 18, 19]    # Alk IC CEC Al Mg Ca Na K
+
 # (b) is bounded by the accuracy of the REFERENCE, not of the thing under test:
 # the 16-D solve's own worst scaled residual is ~3e-11 on these states, so two
 # correct solvers cannot be expected to agree more closely than that. Measured
@@ -71,32 +80,39 @@ ELIM = {3: 0, 4: 3, 6: 5, 11: 10, 12: 11, 13: 12, 14: 13, 15: 14}
 
 
 def harvest(n, seed):
-    """Arguments, starting point and answer of `n` real 8-D solves."""
+    """Arguments, starting point and answer of `n` real solves.
+
+    Spies on the LOG residual and on `root`, which is the production path since
+    F3.5. It deliberately does not patch `_biogeochem_equations_8_numba`: that
+    one is now called from inside another njit function, and replacing the
+    module attribute with a Python wrapper makes numba refuse to compile the
+    caller. The starting point is recovered by inverting the log transform,
+    which is exact.
+    """
     rec, out = {}, []
-    real_eq = bg._biogeochem_equations_8_numba
+    real_eq = bg._biogeochem_equations_8log_numba
 
-    def spy(qv, *args):
+    def spy(y, scale8, *args):
         rec["args"] = args
-        return real_eq(qv, *args)
+        return real_eq(y, scale8, *args)
 
-    real_fsolve = bg.fsolve
+    real_root = bg.root
 
-    def spy_fsolve(func, x0, **kw):
-        res = real_fsolve(func, x0, **kw)
-        x0a = np.atleast_1d(np.asarray(x0, dtype=float))
-        if x0a.size == 8 and "args" in rec:
-            sol = res[0] if isinstance(res, tuple) else res
+    def spy_root(fun, y0, **kw):
+        res = real_root(fun, y0, **kw)
+        if "args" in rec:
             out.append((np.asarray(rec["args"], dtype=float),
-                        x0a.copy(), np.asarray(sol, dtype=float).ravel()))
+                        np.asarray(bg._q_from_y_numba(np.asarray(y0, float))),
+                        np.asarray(bg._q_from_y_numba(np.asarray(res.x, float)))))
         return res
 
-    bg._biogeochem_equations_8_numba = spy
-    bg.fsolve = spy_fsolve
+    bg._biogeochem_equations_8log_numba = spy
+    bg.root = spy_root
     try:
         harness.example_run()
     finally:
-        bg._biogeochem_equations_8_numba = real_eq
-        bg.fsolve = real_fsolve
+        bg._biogeochem_equations_8log_numba = real_eq
+        bg.root = real_root
 
     rng = np.random.default_rng(seed)
     pick = rng.choice(len(out), size=min(n, len(out)), replace=False)
@@ -139,15 +155,22 @@ def main(argv=None):
     # is what makes its f_Na differ from its own definition by 1e-11.
     worst = np.zeros(8)
     fails = 0
+    skipped = np.zeros(8, int)
     r8, r16 = [], []
     for args, q0, q in states:
         a = args
+        biggest = max(abs(a[i]) for i in POOLS)
+        active = np.ones(8, bool)
+        for k, i in TOTAL_OF.items():
+            active[k] = abs(a[i]) > bg.SCALE_FLOOR * biggest
+        skipped += ~active
         x0 = bg._expand_8_numba(q0, *[a[i] for i in EXP_ARGS])
         p16 = np.asarray(fsolve(
             lambda pv: bg._biogeochem_equations_numba(pv, *a), x0, xtol=1e-12))
         ref = p16[KEEP]
         sc = np.maximum(np.abs(ref), np.abs(q))
         rel = np.where(sc > 0, np.abs(q - ref) / np.where(sc > 0, sc, 1.0), 0.0)
+        rel = np.where(active, rel, 0.0)
         worst = np.maximum(worst, rel)
         fails += int(np.any(rel > REL_TOL))
 
@@ -162,7 +185,9 @@ def main(argv=None):
     print("(b) reduced solution vs 16-D solution, same start, same xtol")
     print(f"    {'unknown':>8s} {'worst rel':>11s}")
     for k, slot in enumerate(KEEP):
-        print(f"    {NAME16[slot]:>8s} {worst[k]:11.3e}")
+        note = (f"   ({skipped[k]} of {len(states)} states absent)"
+                if skipped[k] else "")
+        print(f"    {NAME16[slot]:>8s} {worst[k]:11.3e}{note}")
     worst_b = float(worst.max())
     ok_b = fails == 0
     print(f"    worst {worst_b:.3e} over {len(states)} states, "

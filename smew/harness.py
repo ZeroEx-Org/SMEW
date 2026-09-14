@@ -73,7 +73,7 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     # no solve happened -- 0 is a real MINPACK exit code, so it cannot double as
     # "absent". solver_ier != 1 is the solver declining to vouch for its own
     # answer, which until F3.1 was discarded entirely.
-    "solver_ier", "solver_nfev", "solver_rung", "res_max", "res_row",
+    "solver_ier", "solver_nfev", "solver_njev", "solver_rung", "res_max", "res_row",
 ]
 SCHEMA_2D = ["EW", "Wr", "Omega", "M_min", "clip_M_min",
              "errors"]                               # errors is (16, n_steps)
@@ -87,7 +87,7 @@ SCHEMA_SCALAR = [
     # geometry, units, and the vegetation constants the uptake recompute needs
     "n", "Zr", "dt", "conv_mol", "conv_Al", "k_v", "RAI", "root_d",
     # F3.1: solver totals over the whole run, taken before any thinning
-    "n_solve", "n_stall", "nfev_total",
+    "n_solve", "n_stall", "nfev_total", "njev_total",
 ]
 SCHEMA_TEXT = ["mineral"]                            # list of mineral names
 
