@@ -26,6 +26,10 @@ from smew.hydroclimatic import (
     rain_stoc_season
 )
 
+from smew.stoch_lambda_alpha import (
+    stoch_lambda_alpha
+)
+
 from smew.ic import (
     conc_to_f_CEC,
     f_CEC_to_conc,
