@@ -57,6 +57,107 @@ def _biogeochem_equations_numba(
 
 
 # ---------------------------------------------------------------------------
+# The same system in eight unknowns
+# ---------------------------------------------------------------------------
+#
+# Eight of the sixteen equations above are already explicit definitions of one
+# unknown in terms of the others, so they can be substituted out by hand -- no
+# component basis, no reformulation, no choice to make:
+#
+#   Alk   from eq 3      R_alk from eq 4      Al from eq 6
+#   f_Al, f_Mg, f_Na, f_K, f_H  from eqs 11-15
+#
+# leaving eight unknowns -- CO2_w, H, Al_w, Mg, Ca, Na, K, f_Ca -- against the
+# eight remaining equations 1, 2, 5, 7-10 and 16. Exactly determined.
+#
+# The point is not elegance, it is cost. fsolve builds its Jacobian by forward
+# differences, which is n+1 residual evaluations; the 16-D solve measured 34.1
+# evaluations per call, i.e. two Jacobians (17 each) plus a few function
+# evaluations. At n = 8 a Jacobian is 9 evaluations, and the 16-D solve was 35 %
+# of total runtime.
+#
+# Verified before it was written, at 1 000 states sampled from a real run: with
+# the eight substitutions inserted, all eight eliminated rows of the ORIGINAL
+# residual are identically zero. That is a transcription check, and
+# transcription is the whole risk here -- each substitution IS its row, solved
+# for one variable, so anything above a couple of ulp is a typo, not a
+# tolerance. `tests/check_solver8.py` is that check, kept.
+#
+# The naive form of it -- "does the 16-D solution satisfy the eight
+# definitions?" -- reads 1e-11, not 1e-16, and would have been mistaken for a
+# derivation error. It is not: it is fsolve's own residual on those rows, which
+# F3.1 showed is ~1e-11 on the dimensionless rows. The 16-D answer does not
+# satisfy its own equations exactly either -- which is also why the goldens
+# cannot gate this change bit-identically, and why check_solver8 scores both
+# answers on the same sixteen equations rather than against each other.
+
+
+@njit
+def _expand_8_numba(q, k1, k2, k_w, CEC_tot, conv_Al, K1, K2, K3, K4,
+                    K_Ca_Al, K_Ca_Mg, K_Ca_Na, K_Ca_K, K_Ca_H):
+    """The eight substitutions, in dependency order -> the full 16-vector.
+
+    One source of truth: the reduced residual calls this, and so does the
+    expansion of the answer after the solve. The 16-vector it returns is in the
+    same order as `_biogeochem_equations_numba`'s unknowns, so the original
+    residual can be evaluated at it directly -- which is how the gate, `errors`
+    and `res_row` keep meaning exactly what they meant before.
+    """
+    CO2_w = q[0]; H = q[1]; Al_w = q[2]
+    Mg = q[3]; Ca = q[4]; Na = q[5]; K = q[6]; f_Ca = q[7]
+
+    Alk = k1*CO2_w/H + 2*k1*k2*CO2_w/(H**2) - H + k_w/H            # eq 3
+    Al = (H**4/(H**4 + H**3*K1 + H**2*K1*K2 + H*K1*K2*K3
+                + K1*K2*K3*K4))*Al_w                                # eq 6
+    f_Al = (Al/conv_Al)*(f_Ca**3/(K_Ca_Al*Ca**3))**(1/2)            # eq 11
+    f_Mg = Mg*(f_Ca/(K_Ca_Mg*Ca))                                   # eq 12
+    f_Na = Na*(f_Ca/(K_Ca_Na*Ca))**(1/2)                            # eq 13
+    f_K = K*(f_Ca/(K_Ca_K*Ca))**(1/2)                               # eq 14
+    f_H = H*(f_Ca/(K_Ca_H*Ca))**(1/2)                               # eq 15
+    R_alk = (f_Mg + f_Ca + f_Na + f_K)*CEC_tot                      # eq 4
+
+    p = np.empty(16)
+    p[0] = Alk;  p[1] = CO2_w; p[2] = H;    p[3] = R_alk
+    p[4] = Al_w; p[5] = Al;    p[6] = Mg;   p[7] = Ca
+    p[8] = Na;   p[9] = K;     p[10] = f_Al; p[11] = f_Mg
+    p[12] = f_Na; p[13] = f_K; p[14] = f_H; p[15] = f_Ca
+    return p
+
+
+@njit
+def _biogeochem_equations_8_numba(
+        q, Alk_tot, n, Zr, s, IC_tot, k1, k2, k_H, k_w, CEC_tot, conv_Al, Al_tot,
+        K1, K2, K3, K4, Mg_tot, Ca_tot, Na_tot, K_tot, K_Ca_Al, K_Ca_Mg,
+        K_Ca_Na, K_Ca_K, K_Ca_H
+):
+    """Rows 1, 2, 5, 7-10, 16 of the system above, the other eight substituted.
+
+    Same signature as `_biogeochem_equations_numba` apart from the length of the
+    unknown vector, so the two can be driven from one call site and compared.
+    """
+    p = _expand_8_numba(q, k1, k2, k_w, CEC_tot, conv_Al, K1, K2, K3, K4,
+                        K_Ca_Al, K_Ca_Mg, K_Ca_Na, K_Ca_K, K_Ca_H)
+    Alk = p[0]; CO2_w = p[1]; H = p[2]; R_alk = p[3]
+    Al_w = p[4]; Mg = p[6]; Ca = p[7]; Na = p[8]; K = p[9]
+    f_Al = p[10]; f_Mg = p[11]; f_Na = p[12]; f_K = p[13]; f_H = p[14]
+    f_Ca = p[15]
+
+    nZrs1000 = n * Zr * s * 1000
+
+    return (
+        (Alk_tot-R_alk)-Alk*nZrs1000,                                    # 1
+        IC_tot-(CO2_w*(1+k1/H+k2*k1/(H**2))*s
+                + (CO2_w/k_H)*(1-s))*(n*Zr*1000),                        # 2
+        Al_w*nZrs1000+(f_Al/3)*CEC_tot*conv_Al-Al_tot,                   # 5
+        Mg*nZrs1000+f_Mg/2*CEC_tot-Mg_tot,                               # 7
+        Ca*nZrs1000+f_Ca/2*CEC_tot-Ca_tot,                               # 8
+        Na*nZrs1000+f_Na*CEC_tot-Na_tot,                                 # 9
+        K*nZrs1000+f_K*CEC_tot-K_tot,                                    # 10
+        1-(f_Ca+f_Al+f_Mg+f_Na+f_K+f_H),                                 # 16
+    )
+
+
+# ---------------------------------------------------------------------------
 # Resolving the constants
 # ---------------------------------------------------------------------------
 
@@ -444,13 +545,27 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # does not finish by evaluating at its own answer (least_squares, F3's
     # planned fallback). It is a pure function now, and the solution is unpacked
     # explicitly below.
+    _args = (Alk_tot, p.n, p.Zr, now.s, IC_tot, now.k1, now.k2, now.k_H,
+             now.k_w, p.CEC_tot, p.conv_Al, Al_tot, p.K1, p.K2, p.K3, p.K4,
+             Mg_tot, Ca_tot, Na_tot, K_tot, p.K_Ca_Al, p.K_Ca_Mg, p.K_Ca_Na,
+             p.K_Ca_K, p.K_Ca_H)
+
+    # The reduced system is what is solved; the original is what the answer is
+    # judged by. `equations` (16 unknowns) is kept as the reference definition of
+    # the chemistry -- `tests/check_solver8.py` drives both from the same states
+    # and compares -- and is also what produces `errors` below, so the gate,
+    # `res_max` and `res_row` are still statements about the sixteen equations
+    # the model is actually asserting.
     def equations(pv):
-        return _biogeochem_equations_numba(
-            pv, Alk_tot, p.n, p.Zr, now.s, IC_tot, now.k1, now.k2, now.k_H,
-            now.k_w, p.CEC_tot, p.conv_Al, Al_tot, p.K1, p.K2, p.K3, p.K4,
-            Mg_tot, Ca_tot, Na_tot, K_tot, p.K_Ca_Al, p.K_Ca_Mg, p.K_Ca_Na,
-            p.K_Ca_K, p.K_Ca_H
-        )
+        return _biogeochem_equations_numba(pv, *_args)
+
+    def equations8(qv):
+        return _biogeochem_equations_8_numba(qv, *_args)
+
+    def expand8(qv):
+        return _expand_8_numba(qv, now.k1, now.k2, now.k_w, p.CEC_tot,
+                               p.conv_Al, p.K1, p.K2, p.K3, p.K4, p.K_Ca_Al,
+                               p.K_Ca_Mg, p.K_Ca_Na, p.K_Ca_K, p.K_Ca_H)
 
     # initial guess
     nZrs = p.n * p.Zr * now.s * 1000
@@ -458,12 +573,12 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     CO2_w0 = IC_tot / (p.n * p.Zr * 1000) * 1 / (
         now.s * (1 + now.k1 / state.H + now.k2 * now.k1 / (state.H ** 2))
         + (1 - now.s) / now.k_H)
-    R_alk0 = state.R_alk
     Al_w0 = (Al_tot - (state.f_Al / 3) * p.CEC_tot * p.conv_Al) / nZrs
-    H_ = state.H
-    K1, K2, K3, K4 = p.K1, p.K2, p.K3, p.K4
-    Al0 = (H_ ** 4 / (H_ ** 4 + H_ ** 3 * K1 + H_ ** 2 * K1 * K2
-                      + H_ * K1 * K2 * K3 + K1 * K2 * K3 * K4)) * Al_w0
+    K1, K2, K3, K4 = p.K1, p.K2, p.K3, p.K4     # also used by the Al ladder below
+    # R_alk0, Al0 and the eight starting fractions are gone with the equations
+    # that defined them: the reduced system starts from the retained unknowns
+    # only, and the previous guesses for the eliminated ones were never
+    # independent of these in the first place.
     Mg0 = (Mg_tot - state.f_Mg / 2 * p.CEC_tot) / nZrs
     Na0 = (Na_tot - state.f_Na * p.CEC_tot) / nZrs
     Ca0 = (Ca_tot - state.f_Ca / 2 * p.CEC_tot) / nZrs
@@ -486,14 +601,16 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # we can count. Here those abandoned iterates happen to sit on the answer
     # anyway (worst scaled residual measured anywhere is 1e-11), but nothing
     # guarantees that -- it is a property of this system at these conditions.
-    x0 = np.array([Alk0, CO2_w0, H0, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0, K0,
-                   state.f_Al, state.f_Mg, state.f_Na, state.f_K,
-                   state.f_H, state.f_Ca])
+    q0 = np.array([CO2_w0, H0, Al_w0, Mg0, Ca0, Na0, K0, state.f_Ca])
     res_scale = _residual_scale(Alk_tot, IC_tot, p.CEC_tot, Al_tot, Mg_tot,
                                 Ca_tot, Na_tot, K_tot, nZrs)
 
-    sol, info, ier, _ = fsolve(equations, x0, xtol=1e-12, full_output=True)
-    errors = np.asarray(equations(sol))                    # residuals
+    # nfev counts evaluations of the EIGHT-equation residual from here on. It is
+    # not comparable with the numbers F3.1 reported, which were sixteen-equation
+    # evaluations: a forward-difference Jacobian is now 9 of them rather than 17.
+    q, info, ier, _ = fsolve(equations8, q0, xtol=1e-12, full_output=True)
+    sol = expand8(q)
+    errors = np.asarray(equations(sol))                    # residuals, all 16
     nfev = info["nfev"]
 
     # solution 2
@@ -513,10 +630,9 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # converged steps (median 4.7e-12 against 2.2e-16).
     rung = 1
     if np.any(abs(errors) / res_scale > RES_RTOL):
-        x0 = np.array([Alk0, CO2_w0, H0_2, R_alk0, Al_w0, Al0, Mg0, Ca0, Na0,
-                       K0, state.f_Al, state.f_Mg, state.f_Na, state.f_K,
-                       state.f_H, state.f_Ca])
-        sol, info, ier, _ = fsolve(equations, x0, xtol=1e-14, full_output=True)
+        q0 = np.array([CO2_w0, H0_2, Al_w0, Mg0, Ca0, Na0, K0, state.f_Ca])
+        q, info, ier, _ = fsolve(equations8, q0, xtol=1e-14, full_output=True)
+        sol = expand8(q)
         errors = np.asarray(equations(sol))
         nfev += info["nfev"]
         rung = 2
