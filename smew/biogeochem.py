@@ -487,7 +487,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     # H out of 10^-pH_in / gamma_H, and gamma_H is not known until the rest of
     # the initial composition has been derived -- so it needs a second pass
     # through this function, which is the ic.py change deferred below, not this
-    # one. The offset is 0.02-0.12 pH units and the model relaxes off it; the
+    # one. The offset is 0.011-0.094 pH units and the model relaxes off it; the
     # activity pH reported at index 0 is therefore consistent with H, and H is
     # consistent with pH_in read the old way.
     pH = pH_conc = pH_in
