@@ -5,6 +5,7 @@
     python tests/check_activity.py phreeqc    # gamma_i within 1 % of PHREEQC
     python tests/check_activity.py units      # mu against an independent sum
     python tests/check_activity.py shift      # F4.4: what the flag moves, per case
+    python tests/check_activity.py cec        # F4.6: sensitivity to MU_REF_CEC
 
 `identity` is the gate that matters most and it is re-run after every later F4
 step, not only after the first. The whole audit trail of this block is the
@@ -302,6 +303,40 @@ def check_shift(n_out=500, out_path=None):
     return 0
 
 
+def check_cec(t_end=365):
+    """How much the model depends on MU_REF_CEC, which is an estimate.
+
+    The Gaines-Thomas selectivity coefficients are concentration-based by their
+    source's own statement (de Vries & Posch 2003, p.13), so a model working in
+    activities has to lift them to thermodynamic constants at the ionic
+    strength of the calibration data. That ionic strength is not recoverable
+    from the report, so it is an estimate -- and an estimate that feeds a
+    constant deserves to have its sensitivity stated rather than assumed small.
+    """
+    from smew.harness import example_run
+    rows = []
+    for mr in (2e-3, 5e-3, 1e-2, 2e-2):
+        d, _, _ = example_run(t_end=t_end, gamma_on=True, mu_ref_CEC=mr)
+        ok = d["pH"] > 0
+        rows.append((mr, float(np.median(d["f_Ca"][ok])),
+                     float(np.median(d["f_Na"][ok])),
+                     float(np.median(d["Alk"][ok])),
+                     float(np.median(d["pH"][ok]))))
+    print("%-11s %9s %9s %11s %9s" % ("mu_ref_CEC", "f_Ca", "f_Na", "Alk", "pH"))
+    for r in rows:
+        print("%-11.1e %9.5f %9.5f %11.4e %9.5f" % r)
+    span = max(abs(a[i] / b[i] - 1.0) for i in (1, 2, 3)
+               for a in rows for b in rows if b[i])
+    dpH = max(abs(a[4] - b[4]) for a in rows for b in rows)
+    ok = span < 0.05 and dpH < 0.02
+    print("\n%s  over a 10x range in mu_ref_CEC: worst series shift %.2f %%, "
+          "pH shift %.4f" % ("PASS" if ok else "FAIL", 100 * span, dpH))
+    print("      The estimate is not a material uncertainty. For scale, the "
+          "report's own\n      standard deviations on these constants are "
+          "0.35-0.79 log units (factors of 2-6).")
+    return 0 if ok else 1
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     mode = argv[0] if argv else "units"
@@ -311,6 +346,8 @@ def main(argv=None):
         return check_phreeqc()
     if mode == "units":
         return check_units()
+    if mode == "cec":
+        return check_cec()
     if mode == "shift":
         return check_shift(out_path=os.path.join(REPO, "tests", "golden",
                                                  "F4_shift.txt"))

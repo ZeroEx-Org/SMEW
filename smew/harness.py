@@ -364,7 +364,7 @@ def report(results, show_pass=False):
 
 def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
                 with_water=False, temp_av=13, gamma_on=False,
-                gamma_picard=0):
+                gamma_picard=0, mu_ref_CEC=None):
     """One full SMEW pipeline with every input stated explicitly.
 
     Deterministic given seed: rain_stoc is the only stochastic stage.
@@ -449,7 +449,8 @@ def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
         pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in,
         M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in,
         diss_f, dt, conv_Al, conv_mol, keyword_add, gamma_on=gamma_on,
-        gamma_picard=gamma_picard)
+        gamma_picard=gamma_picard,
+        **({} if mu_ref_CEC is None else {"mu_ref_CEC": mu_ref_CEC}))
 
     # series the notebooks plot that biogeochem_balance does not return
     extra = {"rain": rain, "s": s, "ET0": ET0, "SOC": SOC,

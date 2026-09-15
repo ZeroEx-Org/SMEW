@@ -365,7 +365,8 @@ def _jacobian_8log_numba(
 
 def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
-                    gamma_on=False, gamma_picard=0):
+                    gamma_on=False, gamma_picard=0,
+                    mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -389,7 +390,20 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     [K1, K2, K3, K4] = smew.K_Al(conv_mol)
 
     # CEC Gaines-Thomas constants
+    #
+    # These arrive as CONCENTRATION-based selectivity coefficients -- de Vries &
+    # Posch (2003) state that convention explicitly, and say a model working in
+    # activities has to correct them. So on a gamma_on run they are lifted once
+    # to thermodynamic constants at the calibration data's own ionic strength;
+    # activity.effective_constants then brings them back down at each step's mu.
+    # The net correction is only the DIFFERENCE between the two ionic strengths.
+    # See the long note in smew/activity.py. Exact identity when gamma_on is off.
     [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H] = K_CEC
+    if gamma_on:
+        g_ref = activity.gammas(mu_ref_CEC, T_ref_CEC)
+        (K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H) = \
+            activity.exchange_to_thermodynamic(
+                g_ref, K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H)
 
     # nutrient uptake by plants
     [v_f_Ca, v_f_Mg, v_f_K, v_f_Si] = smew.plant_nutr_f()
@@ -426,6 +440,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         tt_app=int(t_app / dt) if has_rock else 0,
         has_rock=has_rock,
         gamma_on=bool(gamma_on), gamma_picard=int(gamma_picard),
+        mu_ref_CEC=float(mu_ref_CEC),
     )
 
 
@@ -1533,7 +1548,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1565,7 +1580,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     nt = len(s)
     p = _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                         M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
-                        gamma_on=gamma_on, gamma_picard=gamma_picard)
+                        gamma_on=gamma_on, gamma_picard=gamma_picard,
+                        mu_ref_CEC=mu_ref_CEC)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15

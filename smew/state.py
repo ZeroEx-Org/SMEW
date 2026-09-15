@@ -130,6 +130,12 @@ class SoilParams:
     # solve, so the analytic Jacobian survives either way. Measured to change
     # nothing at this model's dt; see step().
     gamma_picard: int = 0
+    # Ionic strength [mol/l] at which K_GT_CEC was MEASURED. The Gaines-Thomas
+    # selectivity coefficients are concentration-based by their source's own
+    # statement, so they are lifted to thermodynamic constants at this ionic
+    # strength once per run, and brought back down at each step's own mu. Only
+    # the difference between the two matters. An estimate; see activity.py.
+    mu_ref_CEC: float = 5.0e-3
 
 
 @dataclass(slots=True)

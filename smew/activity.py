@@ -295,3 +295,81 @@ def effective_constants(g, k1, k2, k_w, K1, K2, K3, K4,
 
     return (k1e, k2e, k_we, K1e, K2e, K3e, K4e,
             K_Ca_Mg_e, K_Ca_K_e, K_Ca_Na_e, K_Ca_Al_e, K_Ca_H_e)
+
+
+# ---------------------------------------------------------------------------
+# The calibration convention of K_GT_CEC, which is not the model's convention
+# ---------------------------------------------------------------------------
+#
+# `effective_constants` above assumes every constant handed to it is a
+# THERMODYNAMIC constant, defined on activities. For the carbonate and aluminium
+# constants that is true -- Stumm & Morgan and Weil & Brady both tabulate
+# activity constants. For the Gaines-Thomas selectivity coefficients it is NOT,
+# and the source says so in as many words.
+#
+# constants.py cites a meta-analysis of Dutch soils; that is de Vries & Posch
+# (2003), Alterra-rapport 701, and SMEW's three soil classes are its 0-30 cm
+# rows verbatim -- sand (0.557, -1.157, 0.745), loess->"loam" (0.108, -2.072,
+# 0.378) and clay (0.385, -2.428, 0.774) for Ca-Mg, Ca-K and Ca-Na. Page 13:
+#
+#     "Although from a theoretical standpoint activities would be more
+#      appropriate, we only consider exchange equations involving
+#      concentrations, since they are mostly used in simple models."
+#
+# and, on p.29, about a model that does use activities:
+#
+#     "It should be noted, however, that in the MAGIC model activities are used
+#      instead of concentrations. Thus the exchange constants presented here
+#      would have to be corrected with the proper activity coefficients."
+#
+# So those five numbers are concentration quotients measured at the ionic
+# strength of Dutch forest soil solutions. Feeding them to
+# `effective_constants` unchanged would apply an activity correction to a
+# constant that already has one baked in at the calibration conditions -- a
+# double correction, and in the wrong direction.
+#
+# The fix is a conversion, NOT a refit. Lift each measured constant to its
+# thermodynamic value once, using gamma at the ionic strength of the
+# calibration data; `effective_constants` then brings it back down to a
+# concentration quotient at the model's own ionic strength, step by step. The
+# net correction is therefore only the DIFFERENCE between the two ionic
+# strengths, and it vanishes identically when the model sits where the
+# calibration data sat. That is the physically right answer, and it is also why
+# this is cheap: nothing is being re-estimated.
+#
+# MU_REF_CEC is an estimate and is flagged as one. Alterra-rapport 701 gives
+# adsorbed fractions and exchange constants but does not tabulate the solution
+# composition, so its ionic strength is not recoverable from the report. 5e-3
+# mol/l is representative of the soils it describes -- Dutch non-agricultural
+# forest and heath, soil solution extracted by centrifugation, pH 3-5, under
+# the high N and S deposition of the 1990s. Sensitivity over 2e-3 to 2e-2 is
+# reported in tests/check_activity.py cec.
+#
+# Worth keeping in proportion. The report's own standard deviations on these
+# constants are 0.35 to 0.79 log units -- factors of 2 to 6 -- while this
+# correction is 0.1 to 0.2 log units. It is made because being knowingly
+# inconsistent is not defensible when consistency is free, not because it is
+# large compared with what is known about these parameters.
+
+MU_REF_CEC = 5.0e-3          # [mol/l]  see above; an estimate, not a datum
+
+
+@njit(cache=True)
+def exchange_to_thermodynamic(g_ref, K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al,
+                              K_Ca_H):
+    """Concentration-based selectivity coefficients -> thermodynamic ones.
+
+    The exact inverse of the five exchange lines of `effective_constants`,
+    evaluated at the activity coefficients of the CALIBRATION data rather than
+    of the model state. Applied once per run, not once per step.
+
+    At g_ref = 1 this is an exact identity, so a gamma_on=False run is
+    untouched and the conversion cannot leak into the bit-identity gate.
+    """
+    gH = g_ref[SP_H]; gCa = g_ref[SP_CA]; gMg = g_ref[SP_MG]
+    gNa = g_ref[SP_NA]; gK = g_ref[SP_K]; gAl = g_ref[SP_AL]
+    return (K_Ca_Mg * gMg / gCa,
+            K_Ca_K * (gK * gK) / gCa,
+            K_Ca_Na * (gNa * gNa) / gCa,
+            K_Ca_Al * (gAl * gAl) / gCa ** 3,
+            K_Ca_H * (gH * gH) / gCa)
