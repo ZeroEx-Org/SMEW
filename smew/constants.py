@@ -281,7 +281,30 @@ def carb_weath_const(conv_mol):
 
 def K_GT_CEC(soil, conv_mol):
             
-    # Current values are from a meta-analysis of Dutch soils (0-30 cm, https://edepot.wur.nl/31605)
+    # Source, in full, because the convention matters and a bare URL does not
+    # record it: de Vries, W. & Posch, M. (2003), "Derivation of cation exchange
+    # constants for sand, loess, clay and peat soils on the basis of field
+    # measurements in the Netherlands", Alterra-rapport 701, Wageningen.
+    # https://edepot.wur.nl/31605
+    #
+    # The values below are its 0-30 cm rows verbatim, for Ca-Mg / Ca-K / Ca-Na:
+    #   sand  (Table 20-22)   0.557, -1.157, 0.745
+    #   loess (what SMEW calls "loam")   0.108, -2.072, 0.378
+    #   clay                  0.385, -2.428, 0.774
+    # Several hundred Dutch non-agricultural soils, solution extracted by
+    # centrifugation, pH 3-5, CEC normalised to a buffered pH of 6.5.
+    #
+    # THEY ARE CONCENTRATION-BASED, and the report says so on p.13: "Although
+    # from a theoretical standpoint activities would be more appropriate, we
+    # only consider exchange equations involving concentrations, since they are
+    # mostly used in simple models." And on p.29: a model using activities
+    # "would have to be corrected with the proper activity coefficients."
+    # smew/activity.py does exactly that correction when gamma_on is set; do not
+    # apply it twice.
+    #
+    # Their reported standard deviations are 0.35 to 0.79 log units -- factors
+    # of 2 to 6 -- so these are constraints on a plausible range rather than
+    # precise values, which is the report's own conclusion about them.
     # Site-specific coefficient estimates can be obtained with soil-water coupled measurements
     
     if soil in ['sand', 'loamy sand', 'sandy loam']:
