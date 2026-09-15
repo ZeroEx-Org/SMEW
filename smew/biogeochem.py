@@ -1073,8 +1073,9 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # it rather than replaced, so a pre-F4 run stays reproducible and the
     # offset is inspectable rather than inferred.
     #
-    # Measured across the suite the offset is +0.02 to +0.12 pH units. Small,
-    # one-directional, and it moves every model-vs-experiment pH figure.
+    # Measured across all seven cases the offset is +0.011 to +0.094 pH units,
+    # median 0.042, largest on Vulkaneifel where the ionic strength is highest.
+    # Small, always positive, and it moves every model-vs-experiment pH figure.
     #
     # gamma_H is exactly 1.0 with the flag off, so this is bit-identical there:
     # multiplying by 1.0 is exact in IEEE.
