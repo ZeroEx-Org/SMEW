@@ -66,6 +66,9 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     # activity coefficient, i.e. exactly the activity-vs-concentration pH
     # offset. Both are zero/one on a gamma_on=False run.
     "mu", "gamma_H",
+    # F4.5: pH is the activity pH; pH_conc is the concentration pH the model
+    # reported before F4. Equal on a gamma_on=False run.
+    "pH_conc",
     # forcing carried in from the moisture, respiration and vegetation stages
     "s", "temp_soil", "v", "I", "L", "T", "Dw", "r_het", "r_aut",
     # F2: what the positivity limiter had to do. All zero on a healthy run, so
@@ -360,11 +363,14 @@ def report(results, show_pass=False):
 # ---------------------------------------------------------------------------
 
 def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
-                with_water=False, temp_av=13):
+                with_water=False, temp_av=13, gamma_on=False):
     """One full SMEW pipeline with every input stated explicitly.
 
     Deterministic given seed: rain_stoc is the only stochastic stage.
     Returns (data, t, extra) -- exactly what collect() consumes.
+
+    gamma_on switches F4's activity corrections on. False is bit-identical to
+    every result this function produced before F4.
     """
     import numpy as np
     import smew
@@ -441,7 +447,7 @@ def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
         n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil,
         pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in,
         M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in,
-        diss_f, dt, conv_Al, conv_mol, keyword_add)
+        diss_f, dt, conv_Al, conv_mol, keyword_add, gamma_on=gamma_on)
 
     # series the notebooks plot that biogeochem_balance does not return
     extra = {"rain": rain, "s": s, "ET0": ET0, "SOC": SOC,

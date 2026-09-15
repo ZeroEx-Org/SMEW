@@ -156,7 +156,7 @@ class StepForcing:
 # Series written once per executed timestep. Kept as module constants so the
 # allocator, the writer and the reader cannot drift apart.
 STATE_1D = (
-    "pH", "H", "f_H", "Alk", "Alk_tot", "An", "An_tot",
+    "pH", "pH_conc", "H", "f_H", "Alk", "Alk_tot", "An", "An_tot",
     "CO2_w", "CO2_air", "HCO3", "CO3", "DIC", "IC_tot", "Fs", "ADV",
     "Ca", "Ca_tot", "f_Ca", "Mg", "Mg_tot", "f_Mg",
     "K", "K_tot", "f_K", "Na", "Na_tot", "f_Na", "Si", "Si_tot",
@@ -194,7 +194,13 @@ class SoilState:
     biogeochem.biogeochem_balance about uptake being written at `last`.
     """
     # acid-base and the carbonate system
-    pH: float; H: float; f_H: float; Alk: float; Alk_tot: float
+    #
+    # F4: `pH` is the ACTIVITY pH, -log10(a_H+), which is what a pH electrode
+    # measures and therefore what every Exp_Data overlay is compared against.
+    # `pH_conc` is -log10([H+]/conv_mol), the concentration pH the model
+    # reported before F4, kept permanently so past runs stay comparable. The
+    # two are identical on a gamma_on=False run.
+    pH: float; pH_conc: float; H: float; f_H: float; Alk: float; Alk_tot: float
     An: float; An_tot: float
     CO2_w: float; CO2_air: float; HCO3: float; CO3: float; DIC: float
     IC_tot: float; Fs: float; ADV: float

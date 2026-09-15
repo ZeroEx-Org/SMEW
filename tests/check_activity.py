@@ -4,12 +4,14 @@
     python tests/check_activity.py identity   # gamma_on=False is BIT-identical
     python tests/check_activity.py phreeqc    # gamma_i within 1 % of PHREEQC
     python tests/check_activity.py units      # mu against an independent sum
+    python tests/check_activity.py shift      # F4.4: what the flag moves, per case
 
 `identity` is the gate that matters most and it is re-run after every later F4
 step, not only after the first. The whole audit trail of this block is the
 claim that the flag-off path did not move; the moment that stops being checked,
 an activity effect and a bug become indistinguishable.
 """
+import io
 import os
 import sys
 
@@ -22,7 +24,7 @@ from smew import activity, harness           # noqa: E402
 
 # Keys F4 ADDS. A golden frozen before F4 cannot contain them, so they are the
 # only permitted absences; anything else failing is a regression.
-NEW_KEYS = ("mu", "gamma_H")
+NEW_KEYS = ("mu", "gamma_H", "pH_conc")
 SUFFIXES = ("", "__min", "__max", "__mean", "__sum", "__final")
 
 
@@ -179,6 +181,127 @@ def check_units():
     return 0 if (ok and exact) else 1
 
 
+# ---------------------------------------------------------------------------
+# F4.4 -- what turning the flag on actually does, case by case
+# ---------------------------------------------------------------------------
+
+def _force_gamma_on(flag):
+    """Run every case with gamma_on=flag without editing a notebook.
+
+    The notebooks call smew.biogeochem_balance positionally and know nothing
+    about F4, so the flag is injected by wrapping the package-level name. This
+    is the F3 Part-I pattern: measure by wrapping, not by editing the tree, so
+    the numbers describe the committed code exactly.
+    """
+    import smew
+    import smew.biogeochem as bg
+    orig = bg.biogeochem_balance
+
+    def wrapped(*a, **kw):
+        kw.setdefault("gamma_on", flag)
+        return orig(*a, **kw)
+
+    smew.biogeochem_balance = wrapped
+    bg.biogeochem_balance = wrapped
+    return orig
+
+
+def _restore(orig):
+    import smew
+    import smew.biogeochem as bg
+    smew.biogeochem_balance = orig
+    bg.biogeochem_balance = orig
+
+
+CASES = (("Vials_Dietzen", None), ("Mesocosm_Kelland", None),
+         ("Mesocosm_Amann", None), ("Bottles_tePas", None),
+         ("Example", None), ("Vulkaneifel", "wrapper"),
+         ("Synthetic_application", "synthetic"))
+
+
+def _build(stem, kind, n_out=500):
+    import freeze_cases as fc
+    if kind == "wrapper":
+        return fc.build_wrapper(n_out)
+    if kind == "synthetic":
+        return fc.build_synthetic(n_out)
+    g = fc.exec_notebook(os.path.join(REPO, "Examples", stem + ".ipynb"))
+    return fc.build(g, n_out)
+
+
+def check_shift(n_out=500, out_path=None):
+    """Table of what gamma_on=True moves, per case and per series.
+
+    Not a pass/fail. F4.3 and F4.5 are supposed to change results; this is the
+    record of BY HOW MUCH, which is the deliverable even if the recalibration
+    in F4.6 is never done.
+    """
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    import freeze_cases  # noqa: F401  (sets up sys.path for the notebooks)
+
+    pay = {}
+    for flag in (False, True):
+        orig = _force_gamma_on(flag)
+        try:
+            for stem, kind in CASES:
+                pay[(stem, flag)] = _build(stem, kind, n_out)
+        finally:
+            _restore(orig)
+
+    def ser(pl):
+        return sorted({k.rsplit(".", 1)[0] for k in pl
+                       if k.endswith(".pH") and not k.startswith("_")})
+
+    def g(pl, pre, k):
+        key = pre + "." + k
+        return np.asarray(pl[key], dtype=float) if key in pl else None
+
+    rows = []
+    for stem, _ in CASES:
+        a, b = pay[(stem, False)], pay[(stem, True)]
+        for pre in ser(a):
+            ok = (g(a, pre, "pH") > 0) & np.isfinite(g(a, pre, "pH"))
+            if not ok.any():
+                continue
+            m = lambda pl, k: np.median(g(pl, pre, k)[ok])
+            Wa, Wb = g(a, pre, "W_CaCO3"), g(b, pre, "W_CaCO3")
+            pa = 100.0 * np.mean(Wa[ok] < 0) if Wa is not None else np.nan
+            pb = 100.0 * np.mean(Wb[ok] < 0) if Wb is not None else np.nan
+            ca, cb = g(a, pre, "CaCO3"), g(b, pre, "CaCO3")
+            ew_a, ew_b = g(a, pre, "EW__sum"), g(b, pre, "EW__sum")
+            rows.append(dict(
+                case=stem, series=pre,
+                mu=m(b, "mu"), gH=m(b, "gamma_H"),
+                dpH=m(b, "pH") - m(a, "pH"),
+                r_Alk=m(b, "Alk") / m(a, "Alk") if m(a, "Alk") else np.nan,
+                r_DIC=m(b, "DIC") / m(a, "DIC") if m(a, "DIC") else np.nan,
+                r_Ca=m(b, "Ca") / m(a, "Ca") if m(a, "Ca") else np.nan,
+                cc_a=np.max(ca[ok]), cc_b=np.max(cb[ok]),
+                prec_a=pa, prec_b=pb,
+                r_EW=(float(np.sum(ew_b)) / float(np.sum(ew_a))
+                      if ew_a is not None and float(np.sum(ew_a)) else np.nan),
+                r_Mrock=(m(b, "M_rock") / m(a, "M_rock")
+                         if m(a, "M_rock") else np.nan),
+            ))
+
+    hdr = ("%-21s %-17s %8s %6s %7s %6s %6s %6s %11s %11s %6s %6s %6s %6s"
+           % ("case", "series", "mu", "g(H)", "d pH", "xAlk", "xDIC", "xCa",
+              "CaCO3 off", "CaCO3 on", "%pr o", "%pr on", "xEW", "xRock"))
+    lines = [hdr, "-" * len(hdr)]
+    for r in rows:
+        lines.append("%-21s %-17s %8.2e %6.3f %+7.3f %6.3f %6.3f %6.3f "
+                     "%11.4e %11.4e %6.1f %6.1f %6.3f %6.3f"
+                     % (r["case"], r["series"], r["mu"], r["gH"], r["dpH"],
+                        r["r_Alk"], r["r_DIC"], r["r_Ca"], r["cc_a"], r["cc_b"],
+                        r["prec_a"], r["prec_b"], r["r_EW"], r["r_Mrock"]))
+    txt = "\n".join(lines)
+    print(txt)
+    if out_path:
+        io.open(out_path, "w", encoding="utf-8").write(txt + "\n")
+        print("\nwritten to %s" % out_path)
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     mode = argv[0] if argv else "units"
@@ -188,6 +311,9 @@ def main(argv=None):
         return check_phreeqc()
     if mode == "units":
         return check_units()
+    if mode == "shift":
+        return check_shift(out_path=os.path.join(REPO, "tests", "golden",
+                                                 "F4_shift.txt"))
     if mode == "all":
         return check_units() | check_phreeqc() | check_identity()
     print(__doc__)

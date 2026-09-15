@@ -466,7 +466,16 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     writes at index tt_app -- that index is not necessarily 0.
     """
     # pH
-    pH = pH_in
+    #
+    # pH_in is taken as a CONCENTRATION pH here, which on a gamma_on run is not
+    # what it is: a measured pH is an activity pH. Correcting it means backing
+    # H out of 10^-pH_in / gamma_H, and gamma_H is not known until the rest of
+    # the initial composition has been derived -- so it needs a second pass
+    # through this function, which is the ic.py change deferred below, not this
+    # one. The offset is 0.02-0.12 pH units and the model relaxes off it; the
+    # activity pH reported at index 0 is therefore consistent with H, and H is
+    # consistent with pH_in read the old way.
+    pH = pH_conc = pH_in
     H = 10 ** (-pH) * p.conv_mol
 
     # pCO2
@@ -571,6 +580,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         mu = 0.0
         gam = activity.GAMMA_ONE
     gamma_H = gam[activity.SP_H]
+    # The activity pH of the initial state, from the H the ICs imply.
+    pH = -np.log10(gamma_H * H / p.conv_mol)
 
     # Carbonate weathering
     Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / p.K_CaCO3
@@ -642,7 +653,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     p = replace(p, I_Ca=I_Ca, I_Mg=I_Mg, I_K=I_K, I_Na=I_Na, I_Si=I_Si, I_An=I_An)
 
     state = SoilState(
-        pH=pH, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
+        pH=pH, pH_conc=pH_conc, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
         CO2_w=CO2_w, CO2_air=CO2_air, HCO3=HCO3, CO3=CO3, DIC=DIC,
         IC_tot=IC_tot, Fs=Fs, ADV=0.0,
         Ca=Ca, Ca_tot=Ca_tot, f_Ca=f_Ca, Mg=Mg, Mg_tot=Mg_tot, f_Mg=f_Mg,
@@ -1024,7 +1035,20 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
      f_Al, f_Mg, f_Na, f_K, f_H, f_Ca) = sol
 
     # pH and C
-    pH = -np.log10(H / p.conv_mol)                         # [-]
+    #
+    # F4.5: the reported pH is the ACTIVITY pH, -log10(a_H+) -- the quantity a
+    # pH electrode measures, and therefore the one every Exp_Data overlay has
+    # been compared against all along. The concentration pH is kept alongside
+    # it rather than replaced, so a pre-F4 run stays reproducible and the
+    # offset is inspectable rather than inferred.
+    #
+    # Measured across the suite the offset is +0.02 to +0.12 pH units. Small,
+    # one-directional, and it moves every model-vs-experiment pH figure.
+    #
+    # gamma_H is exactly 1.0 with the flag off, so this is bit-identical there:
+    # multiplying by 1.0 is exact in IEEE.
+    pH_conc = -np.log10(H / p.conv_mol)                    # [-]
+    pH = -np.log10(gamma_H * H / p.conv_mol)               # [-]
     CO2_air = CO2_w / now.k_H                              # [mol/l]
     HCO3 = k1 * CO2_w / H
     CO3 = k2 * k1 * CO2_w / (H ** 2)
@@ -1153,7 +1177,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         EW = Wr * SA * rock_f                                      # [mol/d]
 
     new = SoilState(
-        pH=pH, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
+        pH=pH, pH_conc=pH_conc, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
         CO2_w=CO2_w, CO2_air=CO2_air, HCO3=HCO3, CO3=CO3, DIC=DIC,
         IC_tot=IC_tot, Fs=Fs, ADV=ADV,
         Ca=Ca, Ca_tot=Ca_tot, f_Ca=f_Ca, Mg=Mg, Mg_tot=Mg_tot, f_Mg=f_Mg,
@@ -1639,7 +1663,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     # names here AND there, deliberately.
     return {
         # --- acid-base, carbonate system, CO2 fluxes ---
-        "pH": out["pH"], "H": out["H"], "f_H": out["f_H"], "Alk": out["Alk"],
+        "pH": out["pH"], "pH_conc": out["pH_conc"],
+        "H": out["H"], "f_H": out["f_H"], "Alk": out["Alk"],
         "Alk_tot": out["Alk_tot"], "An": out["An"], "An_tot": out["An_tot"],
         "CO2_w": out["CO2_w"], "CO2_air": out["CO2_air"], "HCO3": out["HCO3"],
         "CO3": out["CO3"], "DIC": out["DIC"], "IC_tot": out["IC_tot"],
