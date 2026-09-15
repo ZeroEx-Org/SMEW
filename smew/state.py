@@ -115,6 +115,14 @@ class SoilParams:
     # Not modelled. Hardcoded to zero exactly as biogeochem.py always did; named
     # here so that it is a stated assumption rather than a bare literal.
     Fe: float = 0.0
+    # --- F4: activities ----------------------------------------------------
+    # False reproduces every result the model produced before F4, bit for bit,
+    # because `activity.effective_constants` at gamma = 1 is an exact identity
+    # (division by 1.0 is exact in IEEE, so this is not a tolerance claim).
+    # That is the whole point of the flag: it is what lets an activity effect be
+    # told apart from a bug for the rest of the block, so the flag-off path is
+    # gated bit-identically at every step of F4, not only at the first.
+    gamma_on: bool = False
 
 
 @dataclass(slots=True)
@@ -155,6 +163,12 @@ STATE_1D = (
     "Al", "AlOH", "AlOH2", "AlOH3", "AlOH4", "Al_w", "Al_tot", "f_Al",
     "R_alk", "M_rock", "CaCO3", "MgCO3", "W_CaCO3", "W_MgCO3",
     "Omega_CaCO3", "Omega_MgCO3", "SA",
+    # F4: the activity model's own state. `mu` is ionic strength [mol/l] --
+    # named mu, not I, because I is infiltration in the output contract and
+    # I_Ca..I_An are the background input fluxes. gamma_H is carried because it
+    # IS the activity-vs-concentration pH offset; every other gamma is a pure
+    # function of (mu, temp_soil) and is recovered with activity.gammas().
+    "mu", "gamma_H",
     # F2 positivity bookkeeping, all zero on a well-behaved step
     "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
     "clip_An", "clip_C", "clip_CaCO3", "clip_MgCO3",
@@ -195,6 +209,9 @@ class SoilState:
     Al_w: float; Al_tot: float; f_Al: float
     # exchange reserve
     R_alk: float
+    # F4: ionic strength [mol/l] and the H+ activity coefficient used this step
+    mu: float
+    gamma_H: float
     # carbonate solids
     CaCO3: float; MgCO3: float
     Omega_CaCO3: float; Omega_MgCO3: float

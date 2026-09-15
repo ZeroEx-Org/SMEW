@@ -8,7 +8,7 @@ from dataclasses import fields, replace
 
 import numpy as np
 import smew
-from smew import weathering_kinec
+from smew import activity, weathering_kinec
 from smew.state import (SoilParams, SoilState, StepForcing,
                         STATE_1D, STATE_MIN, STATE_PSD)
 from numba import njit
@@ -364,7 +364,8 @@ def _jacobian_8log_numba(
 # ---------------------------------------------------------------------------
 
 def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
-                    M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al):
+                    M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
+                    gamma_on=False):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -424,6 +425,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         n_d_cl=len(d_in) if has_rock else 1,
         tt_app=int(t_app / dt) if has_rock else 0,
         has_rock=has_rock,
+        gamma_on=bool(gamma_on),
     )
 
 
@@ -543,9 +545,36 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     # Carbonate minerals (considered as an additional pool)
     CaCO3, MgCO3 = CaCO3_in, MgCO3_in
 
+    # --- F4: activities at t = 0 ---------------------------------------------
+    #
+    # A caveat that belongs here and not in a commit message. The initial
+    # condition is resolved by ic.py, whose Gaines-Thomas conversions
+    # (conc_to_f_CEC and friends) are written on CONCENTRATIONS. So on a
+    # gamma_on run the exchanger composition handed in at t = 0 is not quite the
+    # one the model's own equilibrium would produce from the same totals, and
+    # the first few steps relax off it. That is a property of the IC being an
+    # INPUT, not a solve: pH_in, conc_in and f_CEC_in are measurements. Making
+    # ic.py activity-aware is a separate change with its own result shift, and
+    # entangling it here would make neither attributable.
+    #
+    # What IS corrected is everything downstream of the IC: the saturation
+    # states and rates below feed step 0's explicit balance, so leaving them on
+    # concentrations would put one concentration-based step at the head of every
+    # activity-based run.
+    if p.gamma_on:
+        OH0 = f0.k_w / H if H > 0.0 else 0.0
+        mu = activity.ionic_strength(Ca, Mg, Na, K, H, OH0, HCO3, CO3, An,
+                                     Al, AlOH, AlOH2, AlOH4,
+                                     p.conv_mol, p.conv_Al)
+        gam = activity.gammas(mu, f0.T_K)
+    else:
+        mu = 0.0
+        gam = activity.GAMMA_ONE
+    gamma_H = gam[activity.SP_H]
+
     # Carbonate weathering
-    Omega_CaCO3 = Ca * CO3 / p.K_CaCO3                     # [-]
-    Omega_MgCO3 = Mg * CO3 / p.K_MgCO3
+    Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / p.K_CaCO3
+    Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / p.K_MgCO3
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
                                      f0.s, p.Zr, p.r_CaCO3, p.r_MgCO3,
                                      p.tau_CaCO3, p.tau_MgCO3)
@@ -595,12 +624,19 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
             M_min, M_rock, rock_f = M_min_a, M_rock_a, rock_f_a
             d, delta_d, lamb, SSA, psd, SA = \
                 d_a, delta_d_a, lamb_a, SSA_a, psd_a, SA_a
+            a_Ca0 = gam[activity.SP_CA] * Ca
+            a_Mg0 = gam[activity.SP_MG] * Mg
+            a_K0 = gam[activity.SP_K] * K
+            a_Na0 = gam[activity.SP_NA] * Na
+            a_H0 = gamma_H * H
+            a_Al0 = gam[activity.SP_AL] * Al
             for j in range(0, p.number_min):
                 Omega[j] = weathering_kinec.Omega_sil(
-                    p.mineral[j], Ca, Mg, K, Na, Si, H, Al, p.Fe, p.K_sp[j],
-                    p.conv_mol, p.conv_Al)                 # [-]
+                    p.mineral[j], a_Ca0, a_Mg0, a_K0, a_Na0, Si, a_H0, a_Al0,
+                    p.Fe, p.K_sp[j], p.conv_mol, p.conv_Al)  # [-]
                 Wr[j] = f0.s * p.diss_f * weathering_kinec.mineral_weathering(
-                    p.mineral[j], f0.T_K, Omega[j], H, Al, p.conv_mol, p.conv_Al)
+                    p.mineral[j], f0.T_K, Omega[j], a_H0, a_Al0,
+                    p.conv_mol, p.conv_Al)
                 EW[j] = Wr[j] * SA * rock_f[j]             # [mol-conv/d]
 
     p = replace(p, I_Ca=I_Ca, I_Mg=I_Mg, I_K=I_K, I_Na=I_Na, I_Si=I_Si, I_An=I_An)
@@ -614,6 +650,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         Si=Si, Si_tot=Si_tot,
         Al=Al, AlOH=AlOH, AlOH2=AlOH2, AlOH3=AlOH3, AlOH4=AlOH4,
         Al_w=Al_w, Al_tot=Al_tot, f_Al=f_Al, R_alk=R_alk,
+        mu=mu, gamma_H=gamma_H,
         CaCO3=CaCO3, MgCO3=MgCO3,
         Omega_CaCO3=Omega_CaCO3, Omega_MgCO3=Omega_MgCO3,
         W_CaCO3=W_CaCO3, W_MgCO3=W_MgCO3,
@@ -651,6 +688,38 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     part of the returned state.
     """
     p = params
+
+    # --- F4: activities ------------------------------------------------------
+    #
+    # gamma is LAGGED -- computed from `state`, the step being advanced FROM,
+    # and therefore constant through this step's nonlinear solve. That is what
+    # lets every activity correction fold into the eleven constants below
+    # without touching the residual or F3.5's analytic Jacobian; see the long
+    # note in smew/activity.py. Picard iteration would preserve that property
+    # too; only fully-coupled gamma would break it.
+    #
+    # OH- is estimated from the UNCORRECTED k_w, because the corrected one needs
+    # the gamma this is an input to. The circularity is not worth resolving: at
+    # soil pH, OH- is ~1e-7 mol/l against ~1e-3 for calcium, so its contribution
+    # to mu is six orders below the terms that set it.
+    if p.gamma_on:
+        OH_prev = now.k_w / state.H if state.H > 0.0 else 0.0
+        mu = activity.ionic_strength(
+            state.Ca, state.Mg, state.Na, state.K, state.H, OH_prev,
+            state.HCO3, state.CO3, state.An,
+            state.Al, state.AlOH, state.AlOH2, state.AlOH4,
+            p.conv_mol, p.conv_Al)
+        gam = activity.gammas(mu, now.T_K)
+    else:
+        mu = 0.0
+        gam = activity.GAMMA_ONE
+    # Concentration quotients, i.e. exactly what the residual has always taken.
+    # At gamma = 1 this is an exact identity, not an approximation to it.
+    (k1, k2, k_w, K1, K2, K3, K4,
+     K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H) = activity.effective_constants(
+        gam, now.k1, now.k2, now.k_w, p.K1, p.K2, p.K3, p.K4,
+        p.K_Ca_Mg, p.K_Ca_K, p.K_Ca_Na, p.K_Ca_Al, p.K_Ca_H)
+    gamma_H = gam[activity.SP_H]
 
     # CO2 advection due to moisture variation
     ADV = 0.0
@@ -765,10 +834,12 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # does not finish by evaluating at its own answer (least_squares, F3's
     # planned fallback). It is a pure function now, and the solution is unpacked
     # explicitly below.
-    _args = (Alk_tot, p.n, p.Zr, now.s, IC_tot, now.k1, now.k2, now.k_H,
-             now.k_w, p.CEC_tot, p.conv_Al, Al_tot, p.K1, p.K2, p.K3, p.K4,
-             Mg_tot, Ca_tot, Na_tot, K_tot, p.K_Ca_Al, p.K_Ca_Mg, p.K_Ca_Na,
-             p.K_Ca_K, p.K_Ca_H)
+    # k_H is Henry's constant for CO2(g)/CO2(aq). CO2 is uncharged, so it is
+    # the one constant here that activities leave alone.
+    _args = (Alk_tot, p.n, p.Zr, now.s, IC_tot, k1, k2, now.k_H,
+             k_w, p.CEC_tot, p.conv_Al, Al_tot, K1, K2, K3, K4,
+             Mg_tot, Ca_tot, Na_tot, K_tot, K_Ca_Al, K_Ca_Mg, K_Ca_Na,
+             K_Ca_K, K_Ca_H)
 
     # The reduced system is what is solved; the original is what the answer is
     # judged by. `equations` (16 unknowns) is kept as the reference definition of
@@ -789,18 +860,17 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         return _jacobian_8log_numba(yv, res_scale8, *_args)
 
     def expand8(qv):
-        return _expand_8_numba(qv, now.k1, now.k2, now.k_w, p.CEC_tot,
-                               p.conv_Al, p.K1, p.K2, p.K3, p.K4, p.K_Ca_Al,
-                               p.K_Ca_Mg, p.K_Ca_Na, p.K_Ca_K, p.K_Ca_H)
+        return _expand_8_numba(qv, k1, k2, k_w, p.CEC_tot,
+                               p.conv_Al, K1, K2, K3, K4, K_Ca_Al,
+                               K_Ca_Mg, K_Ca_Na, K_Ca_K, K_Ca_H)
 
     # initial guess
     nZrs = p.n * p.Zr * now.s * 1000
     Alk0 = (Alk_tot - state.R_alk) / nZrs
     CO2_w0 = IC_tot / (p.n * p.Zr * 1000) * 1 / (
-        now.s * (1 + now.k1 / state.H + now.k2 * now.k1 / (state.H ** 2))
+        now.s * (1 + k1 / state.H + k2 * k1 / (state.H ** 2))
         + (1 - now.s) / now.k_H)
     Al_w0 = (Al_tot - (state.f_Al / 3) * p.CEC_tot * p.conv_Al) / nZrs
-    K1, K2, K3, K4 = p.K1, p.K2, p.K3, p.K4     # also used by the Al ladder below
     # R_alk0, Al0 and the eight starting fractions are gone with the equations
     # that defined them: the reduced system starts from the retained unknowns
     # only, and the previous guesses for the eliminated ones were never
@@ -868,7 +938,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         # 1-D fsolve on every step -- 52 559 a year on Example, ~5 % of the
         # run -- to seed a rung that had never been taken.
         def eqH(pv):
-            return _eqH_numba(pv, now.k1, now.k2, CO2_w0, now.k_w, Alk0)
+            return _eqH_numba(pv, k1, k2, CO2_w0, k_w, Alk0)
         H0_2 = fsolve(eqH, state.H)[0]
 
         # Same xtol as rung 1. The rung differs in its STARTING POINT, which
@@ -956,8 +1026,8 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # pH and C
     pH = -np.log10(H / p.conv_mol)                         # [-]
     CO2_air = CO2_w / now.k_H                              # [mol/l]
-    HCO3 = now.k1 * CO2_w / H
-    CO3 = now.k2 * now.k1 * CO2_w / (H ** 2)
+    HCO3 = k1 * CO2_w / H
+    CO3 = k2 * k1 * CO2_w / (H ** 2)
     DIC = CO2_w + HCO3 + CO3
 
     # Al speciation
@@ -990,8 +1060,23 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         clip_MgCO3 = -MgCO3; MgCO3 = 0.0
 
     # Carbonate weathering
-    Omega_CaCO3 = Ca * CO3 / p.K_CaCO3                     # [-]
-    Omega_MgCO3 = Mg * CO3 / p.K_MgCO3
+    #
+    # Outside the implicit solve the natural quantity is the ACTIVITY, so these
+    # take activities directly rather than through an effective constant -- the
+    # same correction, written where it reads as what it is. K_CaCO3 and
+    # K_MgCO3 are solubility products and are already defined on activities.
+    #
+    # This is where F4 changes the model most. carb_W has NO clamp: its
+    # precipitation branch is r*Zr*(1-Omega), linear and unbounded, and
+    # Omega_CaCO3 sits close to 1 in exactly the cases that precipitate. The
+    # gamma_Ca*gamma_CO3 factor measures 0.17-0.78 across the benchmark suite,
+    # which is enough to move Omega from just above 1 to below it -- so
+    # secondary carbonate precipitation, which fires on five of the seven cases
+    # on concentrations, stops firing on any of them. PHREEQC agrees on the
+    # direction independently: at Example step 29861 SMEW reads Omega = 1.17
+    # where PHREEQC reports SI_calcite = -0.16, i.e. undersaturated.
+    Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / p.K_CaCO3
+    Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / p.K_MgCO3
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
                                      now.s, p.Zr, p.r_CaCO3, p.r_MgCO3,
                                      p.tau_CaCO3, p.tau_MgCO3)
@@ -1012,12 +1097,29 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         # other species here does. Caveat unchanged from F0 -- there is no Al
         # sink in the model, so dissolved Al accumulates and the solution sits
         # supersaturated with respect to gibbsite. Needs a solubility control.
+        # Activities, not concentrations. Every Omega_sil branch is a
+        # monomial in the species handed to it, and every KINEC rate law is a
+        # power of H+ (basalt_glass, of H+ and Al+3), so multiplying the
+        # ARGUMENTS by their activity coefficients converts all twenty-odd
+        # branches at once and exactly. The alternative -- a hand-transcribed
+        # table of per-mineral stoichiometry to build a correction factor from
+        # -- would be ~130 exponents copied by hand for no gain, and a single
+        # typo in it would be silent.
+        #
+        # Si is H4SiO4 and Fe is not modelled: both uncharged, gamma = 1.
+        a_Ca = gam[activity.SP_CA] * Ca
+        a_Mg = gam[activity.SP_MG] * Mg
+        a_K = gam[activity.SP_K] * K
+        a_Na = gam[activity.SP_NA] * Na
+        a_H = gamma_H * H
+        a_Al = gam[activity.SP_AL] * Al
         for j in range(0, p.number_min):
             Omega[j] = weathering_kinec.Omega_sil(
-                p.mineral[j], Ca, Mg, K, Na, Si, H, Al, p.Fe, p.K_sp[j],
-                p.conv_mol, p.conv_Al)                     # [-]
+                p.mineral[j], a_Ca, a_Mg, a_K, a_Na, Si, a_H, a_Al, p.Fe,
+                p.K_sp[j], p.conv_mol, p.conv_Al)          # [-]
             Wr[j] = now.s * p.diss_f * weathering_kinec.mineral_weathering(
-                p.mineral[j], now.T_K, Omega[j], H, Al, p.conv_mol, p.conv_Al)
+                p.mineral[j], now.T_K, Omega[j], a_H, a_Al,
+                p.conv_mol, p.conv_Al)
 
         if post_application:
             # mineral fractions in rock
@@ -1059,6 +1161,7 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
         Si=Si, Si_tot=Si_tot,
         Al=Al, AlOH=AlOH, AlOH2=AlOH2, AlOH3=AlOH3, AlOH4=AlOH4,
         Al_w=Al_w, Al_tot=Al_tot, f_Al=f_Al, R_alk=R_alk,
+        mu=mu, gamma_H=gamma_H,
         CaCO3=CaCO3, MgCO3=MgCO3,
         Omega_CaCO3=Omega_CaCO3, Omega_MgCO3=Omega_MgCO3,
         W_CaCO3=W_CaCO3, W_MgCO3=W_MgCO3,
@@ -1345,7 +1448,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1353,6 +1456,14 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     The 34-argument signature is unchanged and the returned series are unchanged.
     Internally this is now a loop over `step`, against one `SoilParams` resolved
     once and one `StepForcing` per timestep; see smew/state.py.
+
+    gamma_on is keyword-only and defaults to False, which reproduces every
+    result produced before F4 BIT FOR BIT -- `activity.effective_constants` at
+    gamma = 1 is an exact identity, not an approximation to one. True turns on
+    ionic strength and activity coefficients (smew/activity.py): the eleven
+    equilibrium constants of the implicit system are rescaled, and the
+    saturation states and rate laws outside it take activities directly. Output
+    series stay in concentrations; `mu` and `gamma_H` are added to the contract.
 
     max_substeps is keyword-only and defaults to the module setting, so the 34
     positional arguments are exactly as they were. Set it to 1 to disable
@@ -1368,7 +1479,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     '''
     nt = len(s)
     p = _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
-                        M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al)
+                        M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
+                        gamma_on=gamma_on)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -1544,6 +1656,12 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         "Al": out["Al"], "AlOH": out["AlOH"], "AlOH2": out["AlOH2"],
         "AlOH3": out["AlOH3"], "AlOH4": out["AlOH4"], "Al_w": out["Al_w"],
         "Al_tot": out["Al_tot"], "f_Al": out["f_Al"],
+        # --- F4 activities ---
+        # mu is ionic strength [mol/l]; gamma_H is the H+ activity coefficient,
+        # which is exactly the activity-vs-concentration pH offset. Every other
+        # gamma is a pure function of (mu, temp_soil): activity.gammas(mu, T_K).
+        # Zero and one respectively on a gamma_on=False run.
+        "mu": out["mu"], "gamma_H": out["gamma_H"],
         # --- solids and their dissolution ---
         "M_rock": out["M_rock"], "CaCO3": out["CaCO3"], "MgCO3": out["MgCO3"],
         "W_CaCO3": out["W_CaCO3"], "W_MgCO3": out["W_MgCO3"],

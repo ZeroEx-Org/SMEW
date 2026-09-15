@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""F4 gates for smew/activity.py.
+
+    python tests/check_activity.py identity   # gamma_on=False is BIT-identical
+    python tests/check_activity.py phreeqc    # gamma_i within 1 % of PHREEQC
+    python tests/check_activity.py units      # mu against an independent sum
+
+`identity` is the gate that matters most and it is re-run after every later F4
+step, not only after the first. The whole audit trail of this block is the
+claim that the flag-off path did not move; the moment that stops being checked,
+an activity effect and a bug become indistinguishable.
+"""
+import os
+import sys
+
+import numpy as np
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+
+from smew import activity, harness           # noqa: E402
+
+# Keys F4 ADDS. A golden frozen before F4 cannot contain them, so they are the
+# only permitted absences; anything else failing is a regression.
+NEW_KEYS = ("mu", "gamma_H")
+SUFFIXES = ("", "__min", "__max", "__mean", "__sum", "__final")
+
+
+def _is_new(key):
+    base = key.rsplit(".", 1)[-1]
+    for s in SUFFIXES:
+        if s and base.endswith(s):
+            base = base[: -len(s)]
+            break
+    return base in NEW_KEYS
+
+
+def check_identity(golden_dir=None, rtol=0.0):
+    """Every pre-F4 key, bit-identical, on every frozen case."""
+    golden_dir = golden_dir or os.path.join(REPO, "tests", "golden")
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    import freeze_cases as fc
+
+    rc = 0
+    for stem, builder in (("Vials_Dietzen", None), ("Mesocosm_Kelland", None),
+                          ("Mesocosm_Amann", None), ("Bottles_tePas", None),
+                          ("Example", None), ("Vulkaneifel", "wrapper"),
+                          ("Synthetic_application", "synthetic")):
+        dest = os.path.join(golden_dir, stem + ".npz")
+        if not os.path.exists(dest):
+            print("%-22s MISS" % stem); rc = 1; continue
+        if builder == "wrapper":
+            new = fc.build_wrapper(500)
+        elif builder == "synthetic":
+            new = fc.build_synthetic(500)
+        else:
+            g = fc.exec_notebook(os.path.join(REPO, "Examples", stem + ".ipynb"))
+            new = fc.build(g, 500)
+        res = harness.compare(harness.load(dest), new, rtol=rtol)
+        bad = [r for r in res if not r[2]]
+        unexpected = [r for r in bad if not _is_new(r[0])]
+        added = len(bad) - len(unexpected)
+        ok = not unexpected
+        print("%-22s %s  %d/%d keys identical (rtol=%g), %d new keys added"
+              % (stem, "PASS" if ok else "FAIL", len(res) - len(bad), len(res),
+                 rtol, added))
+        for k, d, _ in unexpected[:8]:
+            print("      %-30s max|diff| %12.6g" % (k, d))
+        rc |= 0 if ok else 1
+    return rc
+
+
+def check_phreeqc(tol_pct=1.0):
+    """gamma_i within tol_pct of PHREEQC over the model's whole mu range.
+
+    A formula-against-formula comparison on a STATED composition, which is why
+    1 % is achievable here. Saturation indices are deliberately not in this
+    gate: SMEW has no ion pairing, so an SI comparison measures that far larger
+    and separate omission rather than this module. See activity.py's header.
+    """
+    try:
+        import phreeqpython
+    except Exception as exc:
+        print("SKIP  phreeqpython not importable: %s" % exc)
+        return 0
+
+    pp = phreeqpython.PhreeqPython(database="phreeqc.dat")
+    ip = pp.ip
+    ip.run_string(
+        'SELECTED_OUTPUT 1\n -reset false\n -high_precision true\n'
+        'USER_PUNCH 1\n -headings mu gH gOH gHCO3 gCO3 gCa gMg gNa gK gAl gAlOH4\n'
+        ' 10 PUNCH MU, ACT("H+")/MOL("H+"), ACT("OH-")/MOL("OH-")\n'
+        ' 20 PUNCH ACT("HCO3-")/MOL("HCO3-"), ACT("CO3-2")/MOL("CO3-2")\n'
+        ' 30 PUNCH ACT("Ca+2")/MOL("Ca+2"), ACT("Mg+2")/MOL("Mg+2")\n'
+        ' 40 PUNCH ACT("Na+")/MOL("Na+"), ACT("K+")/MOL("K+")\n'
+        ' 50 PUNCH ACT("Al+3")/MOL("Al+3"), ACT("Al(OH)4-")/MOL("Al(OH)4-")\n')
+    COLS = "mu gH gOH gHCO3 gCO3 gCa gMg gNa gK gAl gAlOH4".split()
+    IDX = {"gH": activity.SP_H, "gOH": activity.SP_OH,
+           "gHCO3": activity.SP_HCO3, "gCO3": activity.SP_CO3,
+           "gCa": activity.SP_CA, "gMg": activity.SP_MG,
+           "gNa": activity.SP_NA, "gK": activity.SP_K,
+           "gAl": activity.SP_AL, "gAlOH4": activity.SP_ALOH4}
+
+    worst = {k: (0.0, 0.0, 0.0) for k in IDX}
+    n = 0
+    # The suite's measured mu range is 1.3e-3 to 1.6e-1. This sweep spans
+    # 2e-3 to 5e-1, i.e. past the top of it, so the gate still means something
+    # for an application rate heavier than anything benchmarked so far.
+    for t_C in (2.0, 13.0, 25.0, 35.0):
+        for c in (1e-4, 1e-3, 1e-2, 5e-2, 1e-1, 2e-1):
+            # Chloride is stated and SODIUM balances the charge. Balancing
+            # on Cl instead leaves PHREEQC unable to converge on Ca at the
+            # dilute end, because the stated Cl is then not enough to carry the
+            # divalent cations and the solver is asked to satisfy a fixed pH
+            # and a charge deficit at once.
+            ip.run_string(
+                "SOLUTION 1\n units mol/kgw\n temp %.2f\n pH 7.2\n"
+                " Cl %.6e\n Na %.6e charge\n Ca %.6e\n Mg %.6e\n K %.6e\n"
+                " C(4) 2e-3\n Al 1e-7\n END\n"
+                % (t_C, 2.0 * c, c, c / 3.0, c / 5.0, c / 10.0))
+            row = dict(zip(COLS, (float(v) for v in
+                                  ip.get_selected_output_array()[-1])))
+            mu = row["mu"]
+            g = activity.gammas(mu, t_C + 273.15)
+            n += 1
+            for key, i in IDX.items():
+                ref = row[key]
+                if ref <= 0:
+                    continue
+                err = 100.0 * abs(g[i] - ref) / ref
+                if err > worst[key][0]:
+                    worst[key] = (err, mu, t_C)
+
+    rc = 0
+    print("gamma vs PHREEQC over %d compositions, mu = 2e-3 .. 5e-1, 2-35 C" % n)
+    for key in COLS[1:]:
+        err, mu, t_C = worst[key]
+        ok = err <= tol_pct
+        rc |= 0 if ok else 1
+        print("   %-8s %s worst %6.3f %%  at mu = %.4f, %.0f C"
+              % (activity.SP_NAMES[IDX[key]], "PASS" if ok else "FAIL", err,
+                 mu, t_C))
+    return rc
+
+
+def check_units():
+    """mu from the model's own units against a plain mol/l sum.
+
+    The trap this exists for: conv_Al MULTIPLIES conv_mol, so aluminium is
+    carried in nanomoles while everything else is in micromoles. A translation
+    that misses that produces a plausible-looking gamma from a nonsense mu.
+    """
+    cm, cA = 1e6, 1e3
+    # mol/l, a realistic soil solution
+    m = dict(Ca=1.0e-3, Mg=6.0e-4, Na=4.0e-4, K=1.0e-4, H=10 ** -6.5,
+             OH=1e-14 / 10 ** -6.5, HCO3=1.2e-3, CO3=3.0e-6, An=9.0e-4,
+             Al=2.0e-9, AlOH=5.0e-9, AlOH2=2.0e-8, AlOH4=3.0e-7)
+    z = dict(Ca=2, Mg=2, Na=1, K=1, H=1, OH=-1, HCO3=-1, CO3=-2, An=-1,
+             Al=3, AlOH=2, AlOH2=1, AlOH4=-1)
+    want = 0.5 * sum(m[k] * z[k] ** 2 for k in m)
+
+    got = activity.ionic_strength(
+        m["Ca"] * cm, m["Mg"] * cm, m["Na"] * cm, m["K"] * cm, m["H"] * cm,
+        m["OH"] * cm, m["HCO3"] * cm, m["CO3"] * cm, m["An"] * cm,
+        m["Al"] * cm * cA, m["AlOH"] * cm * cA, m["AlOH2"] * cm * cA,
+        m["AlOH4"] * cm * cA, cm, cA)
+    rel = abs(got - want) / want
+    ok = rel < 1e-14
+    print("mu units   %s  model-units %.8e vs mol/l sum %.8e  rel %.2e"
+          % ("PASS" if ok else "FAIL", got, want, rel))
+
+    # gamma = 1 must be an exact identity, not an approximation to one -- this
+    # is what the bit-identity gate rests on.
+    base = (1e-2, 1e-8, 1e-8, 1e-5, 1e-5, 1e-6, 1e-6, 3.6, 1e-2, 5.6, 2e-2, 4e-6)
+    eff = activity.effective_constants(activity.GAMMA_ONE, *base)
+    exact = all(a == b for a, b in zip(base, eff))
+    print("gamma=1    %s  effective_constants is an exact identity"
+          % ("PASS" if exact else "FAIL"))
+    return 0 if (ok and exact) else 1
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    mode = argv[0] if argv else "units"
+    if mode == "identity":
+        return check_identity(rtol=float(argv[1]) if len(argv) > 1 else 0.0)
+    if mode == "phreeqc":
+        return check_phreeqc()
+    if mode == "units":
+        return check_units()
+    if mode == "all":
+        return check_units() | check_phreeqc() | check_identity()
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

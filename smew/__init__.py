@@ -39,6 +39,13 @@ from smew.ic import (
     Kelland
 )
 
+from smew.activity import (
+    ionic_strength,
+    gammas,
+    dh_coeffs,
+    effective_constants
+)
+
 from smew.weathering import (
     psd_evol,
     sil_Wr,

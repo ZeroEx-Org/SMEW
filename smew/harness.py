@@ -62,6 +62,10 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     "Al", "AlOH", "AlOH2", "AlOH3", "AlOH4", "Al_w", "Al_tot", "f_Al",
     # solid phases and their dissolution fluxes
     "M_rock", "CaCO3", "MgCO3", "W_CaCO3", "W_MgCO3",
+    # F4: the activity model. mu is ionic strength [mol/l]; gamma_H is the H+
+    # activity coefficient, i.e. exactly the activity-vs-concentration pH
+    # offset. Both are zero/one on a gamma_on=False run.
+    "mu", "gamma_H",
     # forcing carried in from the moisture, respiration and vegetation stages
     "s", "temp_soil", "v", "I", "L", "T", "Dw", "r_het", "r_aut",
     # F2: what the positivity limiter had to do. All zero on a healthy run, so
