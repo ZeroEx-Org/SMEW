@@ -123,6 +123,13 @@ class SoilParams:
     # told apart from a bug for the rest of the block, so the flag-off path is
     # gated bit-identically at every step of F4, not only at the first.
     gamma_on: bool = False
+    # Picard sweeps over gamma per timestep. 0 is LAGGED coupling -- gamma from
+    # the previous state -- and is the default and what F4 is gated on. A
+    # positive value re-solves with gamma recomputed from the step's own answer,
+    # which is strictly better and still keeps gamma constant within each inner
+    # solve, so the analytic Jacobian survives either way. Measured to change
+    # nothing at this model's dt; see step().
+    gamma_picard: int = 0
 
 
 @dataclass(slots=True)

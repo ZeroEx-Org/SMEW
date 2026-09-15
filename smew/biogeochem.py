@@ -365,7 +365,7 @@ def _jacobian_8log_numba(
 
 def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
-                    gamma_on=False):
+                    gamma_on=False, gamma_picard=0):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -425,7 +425,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         n_d_cl=len(d_in) if has_rock else 1,
         tt_app=int(t_app / dt) if has_rock else 0,
         has_rock=has_rock,
-        gamma_on=bool(gamma_on),
+        gamma_on=bool(gamma_on), gamma_picard=int(gamma_picard),
     )
 
 
@@ -677,7 +677,27 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
 # One timestep
 # ---------------------------------------------------------------------------
 
-def _step_once(state, params, now, prev, dt, post_application=True, rock_now=None):
+def _gammas_for(state, p, T_K, k_w):
+    """(mu, gamma) from a state. One definition, used by both coupling modes.
+
+    Which STATE is passed is the whole difference between lagged and Picard:
+    lagged passes the step being advanced from, Picard passes the step's own
+    provisional answer. Everything downstream is identical, which is why the
+    two can share a residual, a Jacobian and a gate.
+    """
+    if not p.gamma_on:
+        return 0.0, activity.GAMMA_ONE
+    OH = k_w / state.H if state.H > 0.0 else 0.0
+    mu = activity.ionic_strength(
+        state.Ca, state.Mg, state.Na, state.K, state.H, OH,
+        state.HCO3, state.CO3, state.An,
+        state.Al, state.AlOH, state.AlOH2, state.AlOH4,
+        p.conv_mol, p.conv_Al)
+    return mu, activity.gammas(mu, T_K)
+
+
+def _step_once(state, params, now, prev, dt, post_application=True,
+               rock_now=None, gam_in=None):
     """One forward-Euler-plus-implicit-solve timestep. See step() for the wrapper.
 
     Pure: `state` is never modified.
@@ -693,6 +713,9 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
                 whether the rock geometry evolves this step. False before and
                 exactly at the application timestep, where the geometry is the
                 applied one and `rock_now` supplies it.
+        gam_in  (mu, gamma) to use instead of computing them from `state`.
+                None is the lagged coupling and the default; step() passes this
+                when iterating gamma to self-consistency (F4.7).
 
     Returns (new_state, diagnostics). diagnostics carries the uptake fluxes and
     the solver residuals; see biogeochem_balance for why uptake is not simply
@@ -713,17 +736,10 @@ def _step_once(state, params, now, prev, dt, post_application=True, rock_now=Non
     # the gamma this is an input to. The circularity is not worth resolving: at
     # soil pH, OH- is ~1e-7 mol/l against ~1e-3 for calcium, so its contribution
     # to mu is six orders below the terms that set it.
-    if p.gamma_on:
-        OH_prev = now.k_w / state.H if state.H > 0.0 else 0.0
-        mu = activity.ionic_strength(
-            state.Ca, state.Mg, state.Na, state.K, state.H, OH_prev,
-            state.HCO3, state.CO3, state.An,
-            state.Al, state.AlOH, state.AlOH2, state.AlOH4,
-            p.conv_mol, p.conv_Al)
-        gam = activity.gammas(mu, now.T_K)
+    if gam_in is not None:
+        mu, gam = gam_in                     # a Picard iterate; see step()
     else:
-        mu = 0.0
-        gam = activity.GAMMA_ONE
+        mu, gam = _gammas_for(state, p, now.T_K, now.k_w)
     # Concentration quotients, i.e. exactly what the residual has always taken.
     # At gamma = 1 this is an exact identity, not an approximation to it.
     (k1, k2, k_w, K1, K2, K3, K4,
@@ -1362,6 +1378,9 @@ def _lerp_forcing(a, b, f):
                           for k in _FORCING_FIELDS})
 
 
+GAMMA_PICARD_RTOL = 1e-10
+
+
 def step(state, params, now, prev, dt, post_application=True, rock_now=None,
          max_substeps=MAX_SUBSTEPS):
     """Advance the chemistry by one timestep, sub-stepping if it is too long.
@@ -1390,6 +1409,48 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
     Returns (new_state, diagnostics).
     """
     new, diag = _step_once(state, params, now, prev, dt, post_application, rock_now)
+
+    # --- F4.7: optionally iterate gamma to self-consistency ------------------
+    #
+    # Lagged gamma (params.gamma_picard == 0) is the default and it is what the
+    # whole of F4 rests on: gamma constant within the solve is what keeps
+    # F3.5's analytic Jacobian valid. Picard does NOT give that up -- gamma is
+    # still constant within each inner solve, it is just a better constant --
+    # so this is a free upgrade if the lag ever turns out to matter.
+    #
+    # Measured on Example, over a full year. One sweep is enough -- three
+    # sweeps differ from one by 0.4 % of the gap between one and none, so the
+    # iteration converges immediately -- and against the LAGGED answer it moves
+    # the output series by:
+    #
+    #     key        p50        p99        max  | the activity effect itself
+    #     pH      1.8e-06    2.2e-05    6.3e-03 |          1.9e-02
+    #     Alk     1.5e-05    5.2e-04    6.5e-01 |          3.1e-01
+    #     Ca      5.1e-05    1.3e-04    1.8e-02 |          6.8e-02
+    #     CaCO3   1.2e-05    1.5e-04    1.6e-02 |          3.2e-01
+    #
+    # So the lag error is the same order as the dt discretisation error F2
+    # documented (~1e-5) at the median, about 10x above it at p99, and THREE TO
+    # FOUR ORDERS OF MAGNITUDE below the activity effect it is a part of. The
+    # max column is a handful of drainage steps where mu moves >1 % in one
+    # timestep -- 0.18 % of steps -- and it is transient.
+    #
+    # Against that, one sweep costs 35 % of the run (5.8 s -> 7.9 s per
+    # simulated year). Lagged is the default on those numbers. This stays in
+    # the tree rather than being deleted because the argument for lagging is a
+    # MEASUREMENT, and measurements expire: a saltier application, a longer dt,
+    # or F4.6's recalibration could each move it.
+    if params.gamma_on and params.gamma_picard > 0 and not diag["unconverged"]:
+        for _ in range(params.gamma_picard):
+            gam_new = _gammas_for(new, params, now.T_K, now.k_w)
+            if abs(gam_new[0] - new.mu) <= GAMMA_PICARD_RTOL * max(new.mu, 1e-30):
+                break
+            cand, cdiag = _step_once(state, params, now, prev, dt,
+                                     post_application, rock_now, gam_in=gam_new)
+            if cdiag["unconverged"]:
+                break                        # keep the lagged answer, not a bad one
+            new, diag = cand, cdiag
+
     if (not diag["significant"] and not diag["unconverged"]) or max_substeps <= 1:
         if diag["unconverged"]:
             raise ValueError(_unconverged_msg(diag, dt))
@@ -1472,7 +1533,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1504,7 +1565,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     nt = len(s)
     p = _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                         M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
-                        gamma_on=gamma_on)
+                        gamma_on=gamma_on, gamma_picard=gamma_picard)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
