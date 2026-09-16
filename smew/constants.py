@@ -190,6 +190,10 @@ def min_const(mineral,conv_mol):
         MM_min = 216.547
         min_st = [1, 1, 0, 0, 0, 2]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
 
+    elif mineral == 'enstatite': #MgSiO3
+        MM_min = 100.39
+        min_st = [0, 1, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+
     elif mineral == 'forsterite': #Mg2SiO4
         MM_min = 140.692
         min_st = [0, 2, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]

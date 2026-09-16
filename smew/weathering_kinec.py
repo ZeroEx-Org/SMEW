@@ -132,6 +132,32 @@ def mineral_weathering(mineral, Tk, Omega, H, Al, conv_mol, conv_Al):
         rplus = rplusa + rplusn
         rate = rplus * (1 - (Omega**(1/Sig)))
 
+    elif mineral == 'enstatite': #MgSiO3; M 100.39 g/mol
+        # Palandri & Kharaka (2004), USGS OFR 2004-1068, Table 26 "Pyroxene and Pyroxenoid
+        # Dissolution Rate Parameters" (p.36; source data from Schott & Berner, 1985):
+        # acid mechanism log k25 = -9.02, Ea = 80.0 kJ/mol, n(H+) = 0.600;
+        # neutral mechanism log k25 = -12.72, Ea = 80.0 kJ/mol; no base mechanism reported
+        # (absent for the whole pyroxene/pyroxenoid group). Per the source's own footnote, the
+        # neutral-mechanism k25 is a "cut-off" so the rate does not keep decreasing with pH
+        # above ~7 (data are only available below that), and its Ea is set equal to the acid
+        # mechanism's rather than independently fit.
+        # Table 26's "log k" is k25 (rate constant AT 25C/298.15K, pH=0) -- unlike the A used
+        # everywhere else in this function, it is NOT the Arrhenius pre-exponential factor for
+        # rate = A*exp(-Ea/RT). Using k25 directly as A here would be a unit error. Instead this
+        # uses Palandri & Kharaka's own eq. (6), the algebraically equivalent form recast around
+        # k25: rate = k25 * exp[-Ea/R * (1/T - 1/298.15)].
+        T_ref = 298.15 #[K]
+        k25a = 10**(-9.02)*24*3600*conv_mol #mol.m-2.d-1 (acid mechanism, at 298.15 K)
+        k25n = 10**(-12.72)*24*3600*conv_mol #mol.m-2.d-1 (neutral mechanism, at 298.15 K)
+        Ea = 80000/conv_mol #J.mol-1
+        na = 0.600
+        Sig = 1
+		#rate equations
+        rplusa = k25a * (np.exp(-Ea/R * (1/Tk - 1/T_ref))) * (H**na)
+        rplusn = k25n * (np.exp(-Ea/R * (1/Tk - 1/T_ref)))
+        rplus = rplusa + rplusn
+        rate = rplus * (1 - (Omega**(1/Sig)))
+
     elif mineral == 'forsterite': #Mg2SiO4, M 140.692 g/mol
         Aa =14.8*10**4*24*3600*conv_mol # mol.m-2.s-1
         Ab =220*24*3600*conv_mol # mol.m-2.s-1
@@ -371,6 +397,12 @@ def Omega_sil(mineral, Ca, Mg, K, Na, Si, H, Al, Fe, K_sp, conv_mol, conv_Al):
     elif mineral == 'diopside': #CaMgSi2O6; M 216.55 g/mol
         # CaMgSi2O6 + 4 H+ = Ca+2 + Mg+2 + 2 H2O + 2 SiO2
         Omega = min(1,(((Ca/conv_mol)*(Mg/conv_mol)*(Si/conv_mol)**2)/(H/conv_mol)**4)/10**20.9643)
+
+    elif mineral == 'enstatite': #MgSiO3; M 100.39 g/mol
+        # MgSiO3 + 2 H+ = Mg+2 + SiO2 + H2O
+        # Same equilibrium constant (logK=11.3269) already used for the "Enstatite275" end-member
+        # term inside augite's Omega above, exposed here as its own mineral.
+        Omega = min(1,(((Mg/conv_mol)*(Si/conv_mol))/(H/conv_mol)**2)/10**11.3269)
 
     elif mineral == 'forsterite': #Mg2SiO4, M 140.692 g/mol
         # Mg2SiO4 + 4 H+ =  SiO2 + 2 H2O + 2 Mg+2
