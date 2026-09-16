@@ -286,7 +286,7 @@ def _plot_rock_mass(ax, model_results):
 
 
 def _plot_vegetation(ax, model_results):
-    color_temp, color_veg = PALETTE[1], PALETTE[2]
+    color_temp, color_veg = PALETTE[5], PALETTE[2]
 
     ax_temp = ax.twinx()
     ax_temp.set_ylabel('Temp (°C)', color=color_temp)
@@ -427,7 +427,7 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None):
 
     #units
     conv_mol = 1e6 # Conversion from moles to micromols 
-    conv_Al = 1#e3  Conversion for Al species from micromols to nanomols; decreased as there seems to be an error in the Al species conversion. 
+    conv_Al = 1e3  #Conversion for Al species from micromols to nanomols; decreased as there seems to be an error in the Al species conversion. 
 
     #water balance
     keyword_wb = 1 # 1 = varying soil moisture. 0 = constant soil moisture
