@@ -275,15 +275,16 @@ def build(data, water=None, oc=None):
                "transpiration": transp * d["Na"][j]})
 
     # --- aluminium ----------------------------------------------------------
-    # The ragged one (biogeochem.py:397). conv_Al because aluminium is carried in
-    # different units from the other cations. No background input, no
-    # transpiration, and drainage removes only Al + AlOH4 -- three of the five
-    # dissolved species are missing. Quantified in diagnostics, not judged here.
+    # conv_Al because aluminium is carried in different units from the other
+    # cations. Drainage removes Al_w, the dissolved total, as of P2; it used to
+    # remove only Al + AlOH4 and leave three of the five species behind. Still
+    # no background input and still no transpiration term, unlike every other
+    # cation -- quantified in diagnostics, not judged here.
     el["Al"] = _pool(
         d["Al_tot"], i, j,
         sources={"mineral": mineral("Al") * d["conv_Al"],
                  "clipping_retained": clipped("Al")},
-        sinks={"drainage": drain * (d["Al"][j] + d["AlOH4"][j])})
+        sinks={"drainage": drain * d["Al_w"][j]})
 
     # --- silicon ------------------------------------------------------------
     el["Si"] = _pool(
@@ -556,12 +557,17 @@ def _diagnostics(d, i, j, min_st, EW, dt):
                          "first_step": int(i[np.argmax(bad)])}
     dg["negative_pools"] = neg
 
-    # --- aluminium species missing from drainage ---------------------------
-    # biogeochem.py:397 removes Al + AlOH4 only
-    missing = d["L"][j] * 1000 * dt * (d["AlOH"][j] + d["AlOH2"][j] + d["AlOH3"][j])
-    removed = d["L"][j] * 1000 * dt * (d["Al"][j] + d["AlOH4"][j])
+    # --- aluminium drainage -------------------------------------------------
+    # `mol_omitted` is what the pre-P2 term would have left behind, kept as the
+    # size of the defect that was fixed rather than deleted with it. The
+    # transpiration row is still live: Al has no such sink while every other
+    # cation does, and that is one of the two halves of the open transpiration
+    # question.
+    would_have_missed = d["L"][j] * 1000 * dt * (d["AlOH"][j] + d["AlOH2"][j]
+                                                 + d["AlOH3"][j])
+    removed = d["L"][j] * 1000 * dt * d["Al_w"][j]
     dg["aluminium_drainage_omitted"] = {
-        "mol_omitted": float(np.sum(missing)) * d["conv_Al"],
+        "mol_omitted_before_P2": float(np.sum(would_have_missed)) * d["conv_Al"],
         "mol_removed": float(np.sum(removed)) * d["conv_Al"],
         "no_transpiration_term_mol": float(np.sum(T[j] * 1000 * dt * d["Al_w"][j])) * d["conv_Al"],
     }
@@ -902,8 +908,8 @@ def report(led, terms=True):
     else:
         out.append("      no pool went negative")
     al = dg["aluminium_drainage_omitted"]
-    out.append(f"      Al drained {al['mol_removed']:.3e}, "
-               f"omitted species {al['mol_omitted']:.3e}, "
+    out.append(f"      Al drained {al['mol_removed']:.3e} (P2 added "
+               f"{al['mol_omitted_before_P2']:.3e} that used to be left behind), "
                f"no transpiration term {al['no_transpiration_term_mol']:.3e} mol")
     out.append(f"      carbon not removed by transpiration "
                f"{dg['carbon_transpiration_omitted_mol']:.3e} mol")

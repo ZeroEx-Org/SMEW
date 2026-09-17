@@ -787,8 +787,22 @@ def _step_once(state, params, now, prev, dt, post_application=True,
                            - LT * state.K - UP_K) * dt
     Na_tot = state.Na_tot + (p.I_Na + np.sum(min_st[:, 3] * EW_p)
                              - LT * state.Na) * dt
+    # Al_w, not (Al + AlOH4). Drainage removes whatever is dissolved, and Al_w
+    # IS the dissolved total -- the expansion defines AlOH4 = Al_w - (Al + AlOH
+    # + AlOH2 + AlOH3), so the four hydroxide species and the free ion sum to it
+    # exactly. Removing only the free ion and the fully hydrolysed anion left
+    # AlOH, AlOH2 and AlOH3 in the soil forever: 0.2 % to 68 % of dissolved
+    # aluminium depending on pH, since the middle of the ladder dominates
+    # between about pH 5 and 6.5. It is the only cation whose drainage term was
+    # written species by species rather than as the total, which is how the
+    # three got lost.
+    #
+    # Al still has no transpiration sink while every other cation does. That is
+    # deliberately NOT fixed here: whether transpiration removes solutes at all
+    # is one question asked of every species at once, and answering it for
+    # aluminium alone would bury it.
     Al_tot = state.Al_tot + (np.sum(min_st[:, 4] * EW_p) * p.conv_Al
-                             - prev.L * 1000 * (state.Al + state.AlOH4)) * dt
+                             - prev.L * 1000 * state.Al_w) * dt
     Si_tot = state.Si_tot + (p.I_Si + np.sum(min_st[:, 5] * EW_p)
                              - LT * state.Si - UP_Si) * dt
     An_tot = state.An_tot + (p.I_An - (prev.L + prev.T) * state.An * 1000) * dt
