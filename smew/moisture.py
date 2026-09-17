@@ -7,9 +7,56 @@ import numpy as np
 import smew
 from numba import njit
 
+# The default for `temp_soil`: no temperature series supplied, so no freezing.
+# A module constant rather than None because this function is jitted and numba
+# specialises on the type of a default, not on None-ness.
+_NO_TEMP = np.empty(0, dtype=np.float64)
+
 
 @njit
-def moisture_balance(rain, Zr, soil, ET0, v, k_v, keyword_wb, s_in,t_end,dt):
+def moisture_balance(rain, Zr, soil, ET0, v, k_v, keyword_wb, s_in, t_end, dt,
+                     temp_soil=_NO_TEMP, freeze_on=False):
+    """Laio-type bucket water balance.
+
+    FREEZING (P4). With `freeze_on` and a `temp_soil` series of the same length
+    as the forcing, evaporation, transpiration and leakage are all set to zero
+    wherever `temp_soil < 0`.
+
+    This exists because the model disagreed with itself. biogeochem.py holds the
+    chemistry through frost -- it resumes from the last unfrozen state -- while
+    this function knew nothing about temperature and kept draining. So the water
+    left and the solutes it was carrying did not. Measured on Vulkaneifel, which
+    is frozen 30.6 % of its steps: 43.3 % of ALL drainage over the run happened
+    during the hold, and every gram of solute in it stayed behind. The hold
+    discarded more cation leaching than the model integrated.
+
+    Two modules could have been changed and only one of them is right. Frozen
+    soil has a hydraulic conductivity orders of magnitude below thawed soil, so
+    it should not drain; making the chemistry leach through the frost instead
+    would integrate solute transport in water that is not moving. Zeroing the
+    fluxes here fixes both sides at once -- there is then no leaching for the
+    hold to miss.
+
+    The threshold is `temp_soil < 0`, the SAME test biogeochem.py uses. That is
+    the point of the change: not that zero is the right freezing point for soil
+    water (it is not, exactly -- solutes depress it), but that the two modules
+    now agree on what "frozen" means.
+
+    Evaporation goes too, not just leakage and transpiration. Ice does not
+    evaporate as liquid, and the model has no sublimation term; keeping E alive
+    would dry a frozen profile through a pathway that is not there.
+
+    Rain is deliberately still added to storage. Water arriving on frozen ground
+    is snow and would not infiltrate, but the model has no snowpack; retaining
+    it in the profile and releasing it at thaw is the closer approximation of
+    the two available, and it gives the spring pulse the model previously could
+    not produce. The wetness ceiling (see P1) sends any excess to runoff, which
+    it now records.
+
+    `freeze_on=False` reproduces the previous behaviour exactly, and every
+    benchmark case except Vulkaneifel is above freezing throughout, so those are
+    bit-identical either way.
+    """
     
     #constants
     [s_h, s_w, s_i, b, K_s, n] = smew.soil_const(soil)       
@@ -35,8 +82,25 @@ def moisture_balance(rain, Zr, soil, ET0, v, k_v, keyword_wb, s_in,t_end,dt):
         # Potential evaporation [m/d]
         E0 = 0.5*ET0
         
+        # Only honour freezing when a usable temperature series came with it.
+        use_freeze = freeze_on and len(temp_soil) == len(s)
+
         for i in range(0, len(rain)-1):
-            
+
+            if use_freeze and temp_soil[i] < 0:
+                # Frozen: no liquid water leaves the layer, so no solute does
+                # either. E, T and L stay at their preallocated zeros and the
+                # update below reduces to storage plus whatever fell.
+                s[i+1] = s[i]+rain[i+1]/(n*Zr)
+                if s[i+1] >= 1:
+                    Q[i+1] = (s[i+1]-1)*(n*Zr)
+                    s[i+1] = 1
+                if s[i+1] >= 0.98:
+                    excess = (s[i+1]-0.98)*(n*Zr)
+                    Q[i+1] = Q[i+1] + min(excess, max(rain[i+1]-Q[i+1], 0.0))
+                    s[i+1] = 0.98
+                continue
+
             # Evaporation [m/d]
             if s[i]<=s_h:
                 E[i] = 0

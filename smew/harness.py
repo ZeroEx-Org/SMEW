@@ -367,7 +367,7 @@ def report(results, show_pass=False):
 
 def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
                 with_water=False, temp_av=13, gamma_on=False,
-                gamma_picard=0, mu_ref_CEC=None):
+                gamma_picard=0, mu_ref_CEC=None, freeze_on=False):
     """One full SMEW pipeline with every input stated explicitly.
 
     Deterministic given seed: rain_stoc is the only stochastic stage.
@@ -375,6 +375,10 @@ def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
 
     gamma_on switches F4's activity corrections on. False is bit-identical to
     every result this function produced before F4.
+
+    freeze_on switches P4 on: no evaporation, transpiration or leakage while
+    the soil is frozen. False is bit-identical, and this case never freezes at
+    the default temp_av anyway -- lower temp_av to exercise it.
     """
     import numpy as np
     import smew
@@ -436,7 +440,8 @@ def example_run(seed=42, t_end=365, dt=1 / (24 * 6), diss_f=1.0, day1=1,
 
     # --- 3. moisture balance ---
     s, s_w, s_i, I, L, T, E, Q, Irr, n = smew.moisture_balance(
-        rain, Zr, soil, ET0, v, k_v, keyword_wb, s_in, t_end, dt)
+        rain, Zr, soil, ET0, v, k_v, keyword_wb, s_in, t_end, dt,
+        temp_soil, freeze_on)
 
     # --- 4. organic carbon / respiration ---
     SOC, r_het, r_aut, D = smew.respiration(

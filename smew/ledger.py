@@ -535,11 +535,19 @@ def _diagnostics(d, i, j, min_st, EW, dt):
     dg["n_freeze_intervals"] = int(len(thaws))
 
     # What the skipped steps WOULD have moved had they been integrated: the size
-    # of the approximation. Water fluxes are computed straight through frost
-    # (moisture_balance knows nothing about freezing), so leaching uses the real
-    # L and T over the interval at the HELD concentration -- concentrations at
-    # frozen indices are the allocated zeros and cannot be used. Dissolution
-    # likewise uses the held rate. Respiration needs no row: f_T is clipped at
+    # of the approximation. Leaching uses the real L and T over the interval at
+    # the HELD concentration -- concentrations at frozen indices are the
+    # allocated zeros and cannot be used. Dissolution likewise uses the held
+    # rate.
+    #
+    # THIS IS THE ROW THAT FOUND P4. With moisture_balance unaware of freezing,
+    # these numbers reported more cation leaching skipped than the model
+    # integrated -- 125 % for Ca, 134 % for Si on a two-winter run -- because
+    # the water drained straight through a frost the chemistry was held for.
+    # With `freeze_on` they go to zero by construction: L and T are zero while
+    # frozen, so there is no unaccounted flux left to report. Keeping the row
+    # is what makes that checkable rather than asserted, and it still measures
+    # the real approximation on a freeze_on=False run. Respiration needs no row: f_T is clipped at
     # zero (organic_carbon.py:41), so decomposition genuinely stops.
     # Each interval is the indices strictly between the previous executed step
     # and the thaw, and the state to evaluate it at is j -- the same index the

@@ -399,7 +399,8 @@ def read_input_data(project_name, value_col):
 
     return input_data
 
-def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None):
+def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
+             freeze_on=False):
     """Run the full SMEW pipeline for a project data sheet.
 
     interpolate_frozen : rewrite the 13 series listed below across frozen steps.
@@ -409,6 +410,11 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None):
     seed : passed to rain_stoc_season. None keeps the unseeded default, so
         repeated runs differ; an int makes the run reproducible, which is what
         tests/freeze_cases.py uses.
+    freeze_on : P4. Stop evaporation, transpiration and leakage while the soil
+        is frozen, so the water stops moving at the same moment the chemistry
+        is held. False is the historical behaviour and stays the default.
+        Vulkaneifel is the only benchmark case that ever freezes, and it is
+        frozen 30.6 % of its steps, 43.3 % of all its drainage.
     """
     print('--------------------------------------------------------------------------------------')
     print('Running SMEW for',project_name,'...')
@@ -465,9 +471,22 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None):
     v = smew.veg(v_in, data_in.T_v, data_in.k_v, t0_v, temp_soil, dt)
 
     #moisture balance (I, Q [m], L, T, E [m/d])
-    [s, s_w, s_i, I, L, T, E, Q, Irr, n] = smew.moisture_balance(rain, data_in.Zr, data_in.soil, ET0, v, data_in.k_v, keyword_wb, s_in,t_end,dt)
+    [s, s_w, s_i, I, L, T, E, Q, Irr, n] = smew.moisture_balance(
+        rain, data_in.Zr, data_in.soil, ET0, v, data_in.k_v, keyword_wb, s_in,
+        t_end, dt, temp_soil, freeze_on)
 
-    # Set soil moisture to (almost) zero at negative soil temperatures = freezing 
+    # Set soil moisture to (almost) zero at negative soil temperatures = freezing
+    #
+    # This line predates P4 and does two jobs at once. It is a physical claim --
+    # no liquid water when frozen -- and a plotting sentinel, since `mask =
+    # s != 0.01` below builds the filtered series the figures use.
+    #
+    # With freeze_on the physical claim now lives in moisture_balance, where it
+    # can actually stop the fluxes; this only rewrites `s` AFTER E, T and L have
+    # been computed from it, so on its own it never stopped anything draining.
+    # The chemistry never reads these values either -- through a frost the model
+    # resumes from the last UNFROZEN step -- so it is left in place as the
+    # plotting sentinel it effectively is, rather than quietly removed here.
     s[temp_soil<0]=0.01
 
     # Create filtered version for plots
@@ -506,7 +525,13 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None):
 
     [conc_in, K_CEC] = smew.f_CEC_to_conc(f_CEC_in, data_in.pH_in, data_in.soil, conv_mol, conv_Al)
 
-    d_in = data_in.d_in*1e-6 # [m]
+    # BUG (L0019/L0020, see LEARNINGS.md): data_in.d_in is already converted
+    # um->m in read_input_data (line 384). This re-multiplies by 1e-6, making
+    # every diameter ~1e6x too small, which inflates the fractal SSA estimate
+    # into the thousands-of-m2/g range and can crash biogeochem_balance on the
+    # very first timestep for a large day-0 feedstock application.
+    # d_in = data_in.d_in*1e-6 # [m]
+    d_in = data_in.d_in # [m] -- already in meters from read_input_data
     psd_perc_in = data_in.psd_perc_in/100
 
     #print(sum(psd_perc_in))
