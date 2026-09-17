@@ -377,7 +377,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     number_min = len(mineral) if has_rock else 1
 
     MM_min = np.zeros(number_min)
-    min_st = np.zeros([number_min, 6])
+    min_st = np.zeros([number_min, 7])   # [Ca, Mg, K, Na, Al, Si, Fe]
     K_sp = np.zeros(number_min)
     if has_rock:
         for j in range(0, number_min):
@@ -674,6 +674,9 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         Ca=Ca, Ca_tot=Ca_tot, f_Ca=f_Ca, Mg=Mg, Mg_tot=Mg_tot, f_Mg=f_Mg,
         K=K, K_tot=K_tot, f_K=f_K, Na=Na, Na_tot=Na_tot, f_Na=f_Na,
         Si=Si, Si_tot=Si_tot,
+        # No Fe in the initial condition: there is no Fe_in argument, and the
+        # pool exists to account what the ROCK releases, which is zero at t=0.
+        Fe=0.0, Fe_tot=0.0,
         Al=Al, AlOH=AlOH, AlOH2=AlOH2, AlOH3=AlOH3, AlOH4=AlOH4,
         Al_w=Al_w, Al_tot=Al_tot, f_Al=f_Al, R_alk=R_alk,
         mu=mu, gamma_H=gamma_H,
@@ -805,6 +808,38 @@ def _step_once(state, params, now, prev, dt, post_application=True,
                              - prev.L * 1000 * state.Al_w) * dt
     Si_tot = state.Si_tot + (p.I_Si + np.sum(min_st[:, 5] * EW_p)
                              - LT * state.Si - UP_Si) * dt
+    # --- P3: iron ------------------------------------------------------------
+    #
+    # A MASS TRACER, deliberately, and it is worth being explicit about what
+    # that means because the temptation is to do more.
+    #
+    # Iron is in three of the database's formulas -- augite Fe0.275, basalt
+    # glass Fe0.19, olivine Fe0.2 -- and min_st had no column for it, so the
+    # rock lost its full formula mass while only part of its cations reached
+    # solution. Measured: 27.5 % of the cations released by tePas's augite and
+    # 10.0 % of Kelland's olivine simply vanished.
+    #
+    # What this pool does: accounts the release, removes it by drainage,
+    # closes the rock-to-solution balance.
+    #
+    # What it deliberately does NOT do, and why. It does not enter alkalinity.
+    # Fe2+ leaving a silicate consumes 2 H+ exactly as Mg2+ does, so it
+    # generates alkalinity -- but if it then oxidises and precipitates as
+    # Fe(OH)3 it consumes that alkalinity straight back, and which happens is a
+    # redox question this model cannot answer. Crediting the alkalinity would
+    # be a guess at the favourable end; leaving the mass unaccounted, as
+    # before, was a guess at nothing. So the pool bounds the open question
+    # instead: the alkalinity Fe is worth lies between zero (full oxidation and
+    # precipitation) and 2 eq/mol (none), and the size of that interval is now
+    # a number rather than an omission. It also stays out of the exchanger, out
+    # of the charge balance and out of the ionic strength, since all three need
+    # a valence this model has not got.
+    #
+    # Fe is treated as fully aqueous and fully mobile, which is the LEAST
+    # conservative assumption for how fast it leaves and therefore the right
+    # one for a tracer whose job is to bound a missing term.
+    Fe_tot = state.Fe_tot + (np.sum(min_st[:, 6] * EW_p)
+                             - prev.L * 1000 * state.Fe) * dt
     An_tot = state.An_tot + (p.I_An - (prev.L + prev.T) * state.An * 1000) * dt
     IC_tot = (state.IC_tot + now.I * 1000 * now.DIC_rain - ADV
               + (state.W_CaCO3 + state.W_MgCO3 + prev.r_het + prev.r_aut
@@ -830,7 +865,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # over a run is the model's documented stable dt, which nothing has ever
     # stated before.
     clip_Ca = clip_Mg = clip_K = clip_Na = 0.0
-    clip_Al = clip_Si = clip_An = clip_C = 0.0
+    clip_Al = clip_Si = clip_An = clip_C = clip_Fe = 0.0
     #
     # `_pool > 0.0` is not a strong enough test, and F3.5 is what showed it.
     # On a forsterite feedstock there is no aluminium, so `Al_tot` is float
@@ -850,7 +885,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     _pools = ((state.Ca_tot, Ca_tot), (state.Mg_tot, Mg_tot),
               (state.K_tot, K_tot), (state.Na_tot, Na_tot),
               (state.Al_tot, Al_tot), (state.Si_tot, Si_tot),
-              (state.An_tot, An_tot), (state.IC_tot, IC_tot))
+              (state.An_tot, An_tot), (state.IC_tot, IC_tot),
+              (state.Fe_tot, Fe_tot))
     _floor = SCALE_FLOOR * max(abs(_p) for _p, _ in _pools)
     dt_max = float("inf")
     for _pool, _tent in _pools:
@@ -870,6 +906,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         clip_Al = -Al_tot; Al_tot = 0.0
     if Si_tot < 0.0:
         clip_Si = -Si_tot; Si_tot = 0.0
+    if Fe_tot < 0.0:
+        clip_Fe = -Fe_tot; Fe_tot = 0.0
     if An_tot < 0.0:
         clip_An = -An_tot; An_tot = 0.0
     if IC_tot < 0.0:
@@ -1111,6 +1149,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # concentrations
     Si = Si_tot / nZrs                                     # [mol-conv/l]
     An = An_tot / nZrs                                     # [mol_c-conv/l]
+    Fe = Fe_tot / nZrs                                     # [mol-conv/l], tracer
 
     # CO2 diff flux
     Fs = now.D / (p.Z_CO2) * (CO2_air - p.CO2_atm) * 1000  # [mol/d]
@@ -1228,7 +1267,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         IC_tot=IC_tot, Fs=Fs, ADV=ADV,
         Ca=Ca, Ca_tot=Ca_tot, f_Ca=f_Ca, Mg=Mg, Mg_tot=Mg_tot, f_Mg=f_Mg,
         K=K, K_tot=K_tot, f_K=f_K, Na=Na, Na_tot=Na_tot, f_Na=f_Na,
-        Si=Si, Si_tot=Si_tot,
+        Si=Si, Si_tot=Si_tot, Fe=Fe, Fe_tot=Fe_tot,
         Al=Al, AlOH=AlOH, AlOH2=AlOH2, AlOH3=AlOH3, AlOH4=AlOH4,
         Al_w=Al_w, Al_tot=Al_tot, f_Al=f_Al, R_alk=R_alk,
         mu=mu, gamma_H=gamma_H,
@@ -1241,6 +1280,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         UP_Ca=UP_Ca, UP_Mg=UP_Mg, UP_K=UP_K, UP_Si=UP_Si,
         clip_Ca=clip_Ca, clip_Mg=clip_Mg, clip_K=clip_K, clip_Na=clip_Na,
         clip_Al=clip_Al, clip_Si=clip_Si, clip_An=clip_An, clip_C=clip_C,
+        clip_Fe=clip_Fe,
         clip_CaCO3=clip_CaCO3, clip_MgCO3=clip_MgCO3, clip_M_min=clip_M_min,
         dt_max=dt_max, n_substeps=1.0,
     )
@@ -1769,6 +1809,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         "K": out["K"], "K_tot": out["K_tot"], "f_K": out["f_K"],
         "Na": out["Na"], "Na_tot": out["Na_tot"], "f_Na": out["f_Na"],
         "Si": out["Si"], "Si_tot": out["Si_tot"], "UP_Si": out["UP_Si"],
+        # --- iron: a mass tracer, not a modelled species ---
+        "Fe": out["Fe"], "Fe_tot": out["Fe_tot"],
         # --- aluminium ---
         "Al": out["Al"], "AlOH": out["AlOH"], "AlOH2": out["AlOH2"],
         "AlOH3": out["AlOH3"], "AlOH4": out["AlOH4"], "Al_w": out["Al_w"],
@@ -1806,6 +1848,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         "clip_K": out["clip_K"], "clip_Na": out["clip_Na"],
         "clip_Al": out["clip_Al"], "clip_Si": out["clip_Si"],
         "clip_An": out["clip_An"], "clip_C": out["clip_C"],
+        "clip_Fe": out["clip_Fe"],
         "clip_CaCO3": out["clip_CaCO3"], "clip_MgCO3": out["clip_MgCO3"],
         "clip_M_min": out["clip_M_min"],
         # dt_max: the largest step that would have kept every pool

@@ -91,7 +91,7 @@ class SoilParams:
     mineral: tuple               # names, in the order every per-mineral array uses
     number_min: int
     MM_min: np.ndarray           # molar mass per mineral [g/mol-conv]
-    min_st: np.ndarray           # stoichiometry [Ca, Mg, K, Na, Al, Si] per mineral
+    min_st: np.ndarray           # stoichiometry [Ca, Mg, K, Na, Al, Si, Fe] per mineral
     K_sp: np.ndarray             # solubility product per mineral
     diss_f: float                # per-experiment dissolution scaling [-]
     # --- rock geometry ----------------------------------------------------
@@ -112,8 +112,10 @@ class SoilParams:
     I_Si: float = 0.0
     I_An: float = 0.0
     # --- iron --------------------------------------------------------------
-    # Not modelled. Hardcoded to zero exactly as biogeochem.py always did; named
-    # here so that it is a stated assumption rather than a bare literal.
+    # The aqueous Fe handed to Omega_sil and the KINEC rate laws, still zero.
+    # P3 tracks an Fe MASS pool, which is a different thing: it closes the rock
+    # balance without claiming to know Fe's speciation. Kept zero until item 4
+    # gives the model a redox state to compute it from.
     Fe: float = 0.0
     # --- F4: activities ----------------------------------------------------
     # False reproduces every result the model produced before F4, bit for bit,
@@ -173,6 +175,8 @@ STATE_1D = (
     "CO2_w", "CO2_air", "HCO3", "CO3", "DIC", "IC_tot", "Fs", "ADV",
     "Ca", "Ca_tot", "f_Ca", "Mg", "Mg_tot", "f_Mg",
     "K", "K_tot", "f_K", "Na", "Na_tot", "f_Na", "Si", "Si_tot",
+    # P3: iron, tracked but not reacted. See the Fe_tot balance in biogeochem.py.
+    "Fe", "Fe_tot",
     "Al", "AlOH", "AlOH2", "AlOH3", "AlOH4", "Al_w", "Al_tot", "f_Al",
     "R_alk", "M_rock", "CaCO3", "MgCO3", "W_CaCO3", "W_MgCO3",
     "Omega_CaCO3", "Omega_MgCO3", "SA",
@@ -184,7 +188,7 @@ STATE_1D = (
     "mu", "gamma_H",
     # F2 positivity bookkeeping, all zero on a well-behaved step
     "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
-    "clip_An", "clip_C", "clip_CaCO3", "clip_MgCO3",
+    "clip_An", "clip_C", "clip_Fe", "clip_CaCO3", "clip_MgCO3",
     "dt_max", "n_substeps",
 )
 STATE_MIN = ("EW", "Wr", "Omega", "M_min", "rock_f",
@@ -223,6 +227,8 @@ class SoilState:
     K: float; K_tot: float; f_K: float
     Na: float; Na_tot: float; f_Na: float
     Si: float; Si_tot: float
+    # P3: iron released by silicate dissolution. A TRACER -- see biogeochem.py.
+    Fe: float; Fe_tot: float
     # aluminium
     Al: float; AlOH: float; AlOH2: float; AlOH3: float; AlOH4: float
     Al_w: float; Al_tot: float; f_Al: float
@@ -253,7 +259,7 @@ class SoilState:
     # Zero on every step of every benchmark case -- see check_dt.py.
     clip_Ca: float = 0.0; clip_Mg: float = 0.0; clip_K: float = 0.0
     clip_Na: float = 0.0; clip_Al: float = 0.0; clip_Si: float = 0.0
-    clip_An: float = 0.0; clip_C: float = 0.0
+    clip_An: float = 0.0; clip_C: float = 0.0; clip_Fe: float = 0.0
     clip_CaCO3: float = 0.0; clip_MgCO3: float = 0.0
     clip_M_min: np.ndarray = None
     # dt_max is the largest timestep this state could have been advanced by

@@ -58,6 +58,9 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     "K", "K_tot", "f_K",
     "Na", "Na_tot", "f_Na",
     "Si", "Si_tot", "UP_Si",
+    # P3: iron released by dissolution and removed by drainage. A tracer: no
+    # speciation, no exchange, no alkalinity. See biogeochem.py's Fe_tot.
+    "Fe", "Fe_tot",
     # aluminium: free ion, the four hydroxide species, dissolved and total
     "Al", "AlOH", "AlOH2", "AlOH3", "AlOH4", "Al_w", "Al_tot", "f_Al",
     # solid phases and their dissolution fluxes
@@ -74,7 +77,7 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     # F2: what the positivity limiter had to do. All zero on a healthy run, so
     # these are also the cheapest assertion that a run stayed well-posed.
     "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
-    "clip_An", "clip_C", "clip_CaCO3", "clip_MgCO3",
+    "clip_An", "clip_C", "clip_Fe", "clip_CaCO3", "clip_MgCO3",
     "dt_max", "n_substeps",
     # F3.1: what the nonlinear solve did at each step. NaN where a frost meant
     # no solve happened -- 0 is a real MINPACK exit code, so it cannot double as

@@ -55,22 +55,31 @@ import smew
 ELEMENTS = ("Ca", "Mg", "K", "Na", "Al", "Si", "An", "C")
 
 # column of min_st (the mineral formula written as coefficients) per element
-MIN_ST_COL = {"Ca": 0, "Mg": 1, "K": 2, "Na": 3, "Al": 4, "Si": 5}
+MIN_ST_COL = {"Ca": 0, "Mg": 1, "K": 2, "Na": 3, "Al": 4, "Si": 5, "Fe": 6}
 
 # Cations the model does not track, per formula unit, with their charge. The rock
 # loses its full formula mass when it dissolves, but these never arrive in
-# solution: Fe is hardcoded to 0 at biogeochem.py:59 and there is no Ti or P at
-# all. Maintained by hand from the formula comments in constants.min_const --
-# min_st itself has no column for them.
+# solution. Maintained by hand from the formula comments in constants.min_const,
+# for species min_st has no column for.
+#
+# IRON LEFT THIS TABLE IN P3. It now has a min_st column and a pool of its own,
+# so its MASS is accounted and appears in the element balances below. Its
+# CHARGE is still excluded from alkalinity on purpose -- Fe2+ from a silicate
+# generates alkalinity exactly as Mg2+ does, but oxidation to Fe(OH)3 consumes
+# it again, and which happens is redox. So the charge row stays, as the bound on
+# what is still not decided; the mass row is gone because it is no longer
+# missing.
 UNMODELLED = {
     # mineral        : {species: (stoichiometry, charge)}
-    "augite":         {"Fe": (0.275, 2)},   # Mg0.45Fe0.275Ca0.275SiO3
-    "olivine":        {"Fe": (0.2, 2)},     # Mg1.8Fe0.2SiO4
-    "basalt_glass":   {"Fe": (0.19, 2),     # SiTi0.02Al0.36Fe0.19Mg0.28Ca0.26Na0.08K0.008O3.364
-                       "Ti": (0.02, 4)},
+    "basalt_glass":   {"Ti": (0.02, 4)},    # SiTi0.02Al0.36Fe0.19Mg0.28Ca0.26Na0.08K0.008O3.364
     "hydroxyapatite": {"PO4": (3, -3),      # Ca5(OH)(PO4)3
                        "OH": (1, -1)},
 }
+
+# Iron's charge, per formula unit, assuming Fe(II) -- the valence it leaves a
+# silicate in. This is the alkalinity the model does not credit, and the upper
+# bound of the interval P3 leaves open.
+FE_CHARGE = {"augite": (0.275, 2), "olivine": (0.2, 2), "basalt_glass": (0.19, 2)}
 
 # Closure gates. The reconstruction re-uses the same stored floats, so the only
 # difference from the model's own arithmetic is the order of additions -- both
@@ -286,6 +295,17 @@ def build(data, water=None, oc=None):
                  "clipping_retained": clipped("Al")},
         sinks={"drainage": drain * d["Al_w"][j]})
 
+    # --- iron ---------------------------------------------------------------
+    # P3's tracer pool. Released by dissolution, removed by drainage, touching
+    # nothing else -- no exchanger, no uptake, no background input, no
+    # transpiration term. Gated like any other element: the point of adding it
+    # was to make the rock-to-solution balance closeable, so it has to close.
+    el["Fe"] = _pool(
+        d["Fe_tot"], i, j,
+        sources={"mineral": mineral("Fe"),
+                 "clipping_retained": clipped("Fe")},
+        sinks={"drainage": drain * d["Fe"][j]})
+
     # --- silicon ------------------------------------------------------------
     el["Si"] = _pool(
         d["Si_tot"], i, j,
@@ -438,6 +458,18 @@ def _charge(d, i, j, min_st, EW, drain, transp, up, dt):
 
     # charge released as aluminium, which generates no alkalinity here
     out["aluminium_charge_excluded"] = float(np.sum((al_charge @ EW[:, j]) * dt))
+
+    # The alkalinity iron would generate if none of it oxidised, which the model
+    # does not credit. P3 accounts iron's mass; this is the charge it still does
+    # not account, and it is the upper bound of the open interval -- zero if all
+    # the Fe(II) oxidises and precipitates as Fe(OH)3, this much if none does.
+    fe_chg = 0.0
+    for m_idx, name in enumerate(list(d.get("mineral", []) or [])):
+        if m_idx >= EW.shape[0]:
+            break
+        st, chg = FE_CHARGE.get(str(name), (0.0, 0))
+        fe_chg += float(np.sum(EW[m_idx, j] * dt)) * st * chg
+    out["iron_charge_excluded"] = fe_chg
 
     # cations the rock loses but the solution never receives
     dropped_mol, dropped_chg = {}, 0.0

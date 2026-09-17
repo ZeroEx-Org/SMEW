@@ -157,97 +157,109 @@ def soil_const(soil):
  # EW mineral constants 
 
 def min_const(mineral,conv_mol):
+    """Molar mass and cation stoichiometry of one mineral.
+
+    min_st is [Ca, Mg, K, Na, Al, Si, Fe] per formula unit. IRON IS COLUMN 6 and
+    was added by P3: it is present in the formulas above -- augite Fe0.275,
+    basalt glass Fe0.19, olivine Fe0.2 -- but had no column, so the rock lost
+    its full formula mass while only part of its cations reached solution. See
+    the Fe_tot balance in biogeochem.py for what is and is not done with it.
+
+    Titanium is still dropped (basalt glass carries Ti0.02). That is deliberate:
+    Ti is effectively immobile in soil solution and contributes no alkalinity,
+    so it is a rounding term on the mass balance rather than a missing flux.
+    """
 
     if mineral == 'albite': #NaAlSi3O8
         MM_min = 262.219 # g/mol
-        min_st = [0, 0, 0, 1, 1, 3]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 0, 0, 1, 1, 3, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'anorthite': #CaAl2Si2O8
         MM_min = 278.204
-        min_st = [1, 0, 0, 0, 2, 2]
+        min_st = [1, 0, 0, 0, 2, 2, 0]
 
     elif mineral == 'augite': #Mg0.45Fe0.275Ca0.275SiO3
         MM_min = 113.4
-        min_st = [0.275, 0.45, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0.275, 0.45, 0, 0, 0, 1, 0.275]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'basalt_glass': #SiTi0.02Al0.36Fe0.19Mg0.28Ca0.26Na0.08K0.008O3.364
         MM_min = 122.566
-        min_st = [0.26, 0.28, 0.008, 0.08, 0.36, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0.26, 0.28, 0.008, 0.08, 0.36, 1, 0.19]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'chabazite_Ca': # CaAl2Si4O12:6H2O
         MM_min = 398.37
-        min_st = [1, 0, 0, 0, 2, 4]
+        min_st = [1, 0, 0, 0, 2, 4, 0]
 
     elif mineral == 'clinoptilolite_Ca': #Ca1.5Al3Si15O36:12H2O
         MM_min = 1138.302
-        min_st = [1.5, 0, 0, 0, 3, 15]
+        min_st = [1.5, 0, 0, 0, 3, 15, 0]
 
     elif mineral == 'clinoptilolite_Na': #Na3Al3Si15O36:10H2O
         MM_min = 1147.155
-        min_st = [0, 0, 0, 3, 3, 15]
+        min_st = [0, 0, 0, 3, 3, 15, 0]
 
     elif mineral == 'diopside': #MgCaSi2O6
         MM_min = 216.547
-        min_st = [1, 1, 0, 0, 0, 2]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [1, 1, 0, 0, 0, 2, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'enstatite': #MgSiO3
         MM_min = 100.39
-        min_st = [0, 1, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 1, 0, 0, 0, 1, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'forsterite': #Mg2SiO4
         MM_min = 140.692
-        min_st = [0, 2, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 2, 0, 0, 0, 1, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
             
     #elif mineral == 'Fe_forsterite': #FeMgSiO4
-    #    min_st = [0, 1, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+    #    min_st = [0, 1, 0, 0, 0, 1]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'heulandite_Ca': # CaAl2Si7O18:6H2O
         MM_min = 578.619
-        min_st = [1, 0, 0, 0, 2, 7]
+        min_st = [1, 0, 0, 0, 2, 7, 0]
 
     elif mineral == 'heulandite_Na': # Na2Al2Si7O18:5H2O
         MM_min = 584.521
-        min_st = [0, 0, 0, 2, 2, 7]
+        min_st = [0, 0, 0, 2, 2, 7, 0]
 
     elif mineral == 'hydroxyapatite': #Ca5(OH)(PO4)3
         MM_min = 502.31
-        min_st = [5, 0, 0, 0, 0, 0]
+        min_st = [5, 0, 0, 0, 0, 0, 0]
 
     elif mineral == 'K_feldspar': #KAlSi3O8
         MM_min = 278.33
-        min_st = [0, 0, 1, 0, 1, 3]
+        min_st = [0, 0, 1, 0, 1, 3, 0]
     
     elif mineral == 'labradorite': # Ca0.68Na0.32Al1.68Si2.32O8
         MM_min = 245.84
-        min_st = [0.68, 0, 0, 0.32, 1.68, 2.32]
+        min_st = [0.68, 0, 0, 0.32, 1.68, 2.32, 0]
 
     elif mineral == 'leucite': #K(AlSi2O6) # From Bertagni et al. (2025) original code
         MM_min = 218
-        min_st = [0, 0, 1, 0, 1, 2]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 0, 1, 0, 1, 2, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'muscovite': #KAl3Si3O10(OH)2
         MM_min = 398.303
-        min_st = [0, 0, 1, 0, 3, 3]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 0, 1, 0, 3, 3, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'nepheline': #NaAlSiO4
         MM_min = 142.053
-        min_st = [0, 0, 0, 1, 1, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 0, 0, 1, 1, 1, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'olivine': #Mg1.8Fe0.2SiO4
         MM_min = 147.31
-        min_st = [0, 1.8, 0, 0, 0, 1]
+        min_st = [0, 1.8, 0, 0, 0, 1, 0.2]
             
     elif mineral == 'wollastonite': #CaSiO3
         MM_min = 117.1
-        min_st = [1, 0, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [1, 0, 0, 0, 0, 1, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'alkali_feldspar': #K0.41Na0.56Ca0.03Al1.03Si2.97O8 (Kelland et al., 2020)
         MM_min = 156
-        min_st = [0.03, 0, 0.41, 0.56, 1.03, 2.97]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0.03, 0, 0.41, 0.56, 1.03, 2.97, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
 
     elif mineral == 'sio2(a,gl)': #SiO2 (amorphous silica/glass); GFW and density from MINTEQA2
         MM_min = 60.0848
-        min_st = [0, 0, 0, 0, 0, 1]# Stochiometric coefficients [Ca, Mg, K, Na, Al, Si]
+        min_st = [0, 0, 0, 0, 0, 1, 0]# [Ca, Mg, K, Na, Al, Si, Fe]
         # No KINEC/kinetic rate law available for this phase yet -> not usable in mineral_weathering()/biogeochem_balance.
 
     else:
