@@ -590,25 +590,28 @@ def _diagnostics(d, i, j, min_st, EW, dt):
 
 
 def _water(d, water):
-    """The water balance, and the ceiling that quietly discards water.
+    """The water balance. It closes.
 
-    moisture.py:63-69 runs two clamps in sequence. If wetness would exceed 1 the
-    excess is recorded as runoff Q and wetness set to 1 -- properly accounted,
-    and already inside I = rain - Q. Then, unconditionally,
+    moisture.py runs two clamps in sequence. If wetness would exceed 1 the
+    excess becomes runoff Q and wetness is set to 1. The second, the 0.98
+    ceiling kept "to avoid numerical issues", used to drop a further
+    0.02*n*Zr with no record anywhere -- and since every solute concentration
+    in this model is a pool over a water volume, water removed silently
+    concentrates everything left behind.
 
-        if s[i+1] >= 0.98: s[i+1] = 0.98
+    Both clamps now route their water to Q, so the identity from moisture.py's
+    update, with I = rain - Q,
 
-    with no record anywhere. Every solute concentration is a pool divided by a
-    water volume, so water removed without a record concentrates everything left
-    behind.
+        (s[i+1] - s[i]) * n * Zr = I[i+1] - (E[i] + T[i] + L[i]) * dt
 
-    The identity, from moisture.py:60 with I = rain - Q:
+    holds at EVERY step rather than everywhere except the ceiling. This function
+    used to be written to report a known leak; it is a closure test now, and
+    `unexplained_rel` is the gate for all steps, not just the ones off the
+    ceiling.
 
-        (s[i+1] - s[i]) * n * Zr = I[i+1] - (E[i] + T[i] + L[i]) * dt - ceiling
-
-    so the residual IS the discarded water. The test is therefore not that the
-    residual is zero, but that it is non-negative and non-zero ONLY at steps
-    where the ceiling actually fired.
+    `n_at_ceiling` is kept -- how often the ceiling binds is a real modelling
+    choice and should stay visible rather than becoming invisible the moment it
+    stopped being a bug.
     """
     s = np.asarray(d["s"], dtype=float)
     E = np.asarray(water["E"], dtype=float)
@@ -626,17 +629,19 @@ def _water(d, water):
     residual = (I[k + 1] - (E[k] + T[k] + L[k]) * dt) - (s[k + 1] - s[k]) * nZr
     at_ceiling = np.isclose(s[k + 1], 0.98, rtol=0, atol=1e-15)
 
+    # The water the ceiling removes is no longer recoverable here, and that is
+    # the point: it used to BE this residual, and now it is inside Q. So what is
+    # reported is how often the ceiling bound, not how much it destroyed --
+    # there is nothing left to destroy. `rain` is not in the output contract, so
+    # Q cannot be reconstructed from `d` to split it back out; if that number is
+    # ever wanted, pass Q the way E is passed.
     scale = max(float(np.max(np.abs(I))), 1e-300)
-    off = residual[~at_ceiling]
     return {
         "n_steps": len(k),
         "n_at_ceiling": int(at_ceiling.sum()),
-        "ceiling_water_m": float(np.sum(residual[at_ceiling])),
-        "ceiling_water_mm_per_event": (float(np.mean(residual[at_ceiling])) * 1000
-                                       if at_ceiling.any() else 0.0),
-        "unexplained_max_m": float(np.max(np.abs(off))) if off.size else 0.0,
-        "unexplained_rel": (float(np.max(np.abs(off))) / scale) if off.size else 0.0,
-        "any_negative_ceiling": bool(np.any(residual[at_ceiling] < -1e-15)),
+        # Gated over EVERY step now, not just the ones off the ceiling.
+        "unexplained_max_m": float(np.max(np.abs(residual))),
+        "unexplained_rel": float(np.max(np.abs(residual))) / scale,
     }
 
 
@@ -820,8 +825,6 @@ def failures(led, rows=None):
     if w and "skipped" not in w:
         if w["unexplained_rel"] > 1e-10:
             out.append(f"water: unexplained {w['unexplained_rel']:.2e} relative")
-        if w["any_negative_ceiling"]:
-            out.append("water: the 0.98 ceiling ADDED water at some step")
 
     o = led.get("organic_carbon", {})
     if o and "skipped" not in o:
@@ -924,10 +927,9 @@ def report(led, terms=True):
         if "skipped" in w:
             out.append(f"water balance: skipped -- {w['skipped']}")
         else:
-            out.append(f"water balance: {w['n_at_ceiling']} of {w['n_steps']} steps hit "
-                       f"the 0.98 ceiling, discarding {w['ceiling_water_m']*1000:.2f} mm "
-                       f"total ({w['ceiling_water_mm_per_event']:.2f} mm per event); "
-                       f"unexplained {w['unexplained_rel']:.2e} relative")
+            out.append(f"water balance: closes to {w['unexplained_rel']:.2e} relative; "
+                       f"{w['n_at_ceiling']} of {w['n_steps']} steps hit the 0.98 "
+                       f"ceiling, and that water is now inside Q")
 
     o = led.get("organic_carbon")
     if o:

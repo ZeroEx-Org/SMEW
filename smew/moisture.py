@@ -64,8 +64,32 @@ def moisture_balance(rain, Zr, soil, ET0, v, k_v, keyword_wb, s_in,t_end,dt):
                 Q[i+1] = (s[i+1]-1)*(n*Zr)
                 s[i+1] = 1  
 
-            #to avoid numerical issues
+            # Wetness ceiling, kept "to avoid numerical issues" -- but the water
+            # it removes is now RECORDED as runoff instead of deleted.
+            #
+            # The clamp above it is properly accounted: excess over saturation
+            # becomes Q, and I = rain - Q carries that through. This one fired
+            # straight after it and dropped a further 0.02*n*Zr with no record
+            # anywhere. Every solute concentration in this model is a pool over
+            # a water volume, so water removed silently CONCENTRATES everything
+            # left behind -- and the mass-balance ledger's water row could only
+            # report the loss, not close.
+            #
+            # Routing it to Q is the conservative reading and the one consistent
+            # with the line above: this is rain the soil could not take, so it
+            # never infiltrated. It therefore carries no solutes out, which is
+            # what makes it a bookkeeping fix rather than a new loss pathway.
+            #
+            # The ceiling can only be reached on a step that received rain --
+            # with rain[i+1] = 0 the update is monotonically decreasing and s[i]
+            # is already at or below 0.98 -- so attributing the water to runoff
+            # is always available. The min() is a guard on the one case that
+            # breaks that argument, an initial condition set above the ceiling;
+            # it keeps I = rain - Q non-negative. Measured across the suite, it
+            # never binds.
             if s[i+1] >= 0.98:
+                excess = (s[i+1]-0.98)*(n*Zr)
+                Q[i+1] = Q[i+1] + min(excess, max(rain[i+1]-Q[i+1], 0.0))
                 s[i+1] = 0.98
 
         #infiltration [m]
