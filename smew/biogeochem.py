@@ -367,7 +367,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                     gamma_on=False, gamma_picard=0,
                     mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
-                    mg_phase="magnesite"):
+                    mg_phase="magnesite", pH_method="solution"):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -444,6 +444,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         has_rock=has_rock,
         gamma_on=bool(gamma_on), gamma_picard=int(gamma_picard),
         mu_ref_CEC=float(mu_ref_CEC), mg_phase=str(mg_phase),
+        pH_method=str(pH_method),
     )
 
 
@@ -485,50 +486,90 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     `applied` is the rock geometry at the application timestep, which the caller
     writes at index tt_app -- that index is not necessarily 0.
     """
-    # pH
+    # --- pH: what was measured, and what the model needs -------------------
     #
-    # pH_in is taken as a CONCENTRATION pH here, which on a gamma_on run is not
-    # what it is: a measured pH is an activity pH. Correcting it means backing
-    # H out of 10^-pH_in / gamma_H, and gamma_H is not known until the rest of
-    # the initial composition has been derived -- so it needs a second pass
-    # through this function, which is the ic.py change deferred below, not this
-    # one. The offset is 0.011-0.094 pH units and the model relaxes off it; the
-    # activity pH reported at index 0 is therefore consistent with H, and H is
-    # consistent with pH_in read the old way.
-    pH = pH_conc = pH_in
-    H = 10 ** (-pH) * p.conv_mol
+    # Two conversions sit between a reported soil pH and the [H+] this function
+    # has to start from, and until P6 the model did neither.
+    #
+    # 1. WHICH SOLUTION WAS MEASURED. `pH_method` says. A pH read in 0.01 M
+    #    CaCl2 is not the same number as one read in water, and neither is
+    #    automatically the pH of the soil solution at field moisture, which is
+    #    what the model means by pH. `_PH_TO_SOLUTION` carries the offsets and
+    #    the reasoning; "solution" is the default and subtracts nothing, which
+    #    is what every run before P6 assumed.
+    #
+    # 2. ACTIVITY VERSUS CONCENTRATION. A pH electrode measures the ACTIVITY of
+    #    H+. The model's H is a CONCENTRATION -- it has to be, because the
+    #    Gaines-Thomas constants below are concentration-based (F4.6) and so is
+    #    the aluminium ladder. So [H+] = 10^-pH / gamma_H, not 10^-pH.
+    #
+    # gamma_H needs the ionic strength, which needs the composition, which needs
+    # H. That circularity is why this was deferred at F4.5, and it is resolved
+    # here by the obvious means: iterate. Convergence is immediate because the
+    # ionic strength is dominated by Ca, Mg, Na and K, which are INPUTS and do
+    # not move between passes; only An shifts, and weakly. Two passes are
+    # enough and three is the setting, so the loop is cheap insurance rather
+    # than a solve.
+    #
+    # With gamma_on=False, gamma_H is exactly 1 and the loop exits on the first
+    # pass with H = 10^-pH_in * conv_mol -- bit-identical to every pre-P6 run.
+    # That is not a special case bolted on: an "activity pH" and a
+    # "concentration pH" ARE the same number when every activity coefficient
+    # is one.
+    pH_sol = pH_in - _PH_TO_SOLUTION[p.pH_method]
+    gamma_H_ic = 1.0
+    for _pass in range(_IC_PH_MAX_PASSES):
+        H = 10 ** (-pH_sol) / gamma_H_ic * p.conv_mol
 
-    # pCO2
-    CO2_air = (f0.r_het + f0.r_aut) / (f0.D * 1000 / (p.Z_CO2)) + p.CO2_atm
-    Fs = f0.D / (p.Z_CO2) * (CO2_air - p.CO2_atm) * 1000   # [mol-conv/d]
-    CO2_w = f0.k_H * CO2_air                               # Henry's law
+        # pCO2
+        CO2_air = (f0.r_het + f0.r_aut) / (f0.D * 1000 / (p.Z_CO2)) + p.CO2_atm
+        Fs = f0.D / (p.Z_CO2) * (CO2_air - p.CO2_atm) * 1000   # [mol-conv/d]
+        CO2_w = f0.k_H * CO2_air                               # Henry's law
 
-    # carbonate system
-    HCO3 = f0.k1 * CO2_w / H                               # [mol/l]
-    CO3 = f0.k2 * f0.k1 * CO2_w / (H ** 2)                 # [mol/l]
-    DIC = HCO3 + CO3 + CO2_w
-    IC_tot = (DIC * f0.s + CO2_air * (1 - f0.s)) * (p.n * p.Zr * 1000)   # [mol]
+        # carbonate system
+        HCO3 = f0.k1 * CO2_w / H                               # [mol/l]
+        CO3 = f0.k2 * f0.k1 * CO2_w / (H ** 2)                 # [mol/l]
+        DIC = HCO3 + CO3 + CO2_w
+        IC_tot = (DIC * f0.s + CO2_air * (1 - f0.s)) * (p.n * p.Zr * 1000)   # [mol]
 
-    # Alk
-    Alk = HCO3 + 2 * CO3 - H + f0.k_w / H
+        # Alk
+        Alk = HCO3 + 2 * CO3 - H + f0.k_w / H
 
-    # cations (mol/l)
-    [Ca, Mg, K, Na, Al_w] = conc_in
+        # cations (mol/l)
+        [Ca, Mg, K, Na, Al_w] = conc_in
 
-    # anions (mol_c/l)
-    An = 2 * Mg + 2 * Ca + Na + K - Alk                    # [mol_c/l]
-    if An < 0:
-        print(An)
-        raise ValueError("Not enough cations for this alkalinity")
+        # anions (mol_c/l)
+        An = 2 * Mg + 2 * Ca + Na + K - Alk                    # [mol_c/l]
+        if An < 0:
+            print(An)
+            raise ValueError("Not enough cations for this alkalinity")
 
-    # aluminium speciation
-    K1, K2, K3, K4 = f0.K1, f0.K2, f0.K3, f0.K4
-    den = H ** 4 + H ** 3 * K1 + H ** 2 * K1 * K2 + H * K1 * K2 * K3 + K1 * K2 * K3 * K4
-    Al = (H ** 4 / den) * Al_w                             # mol/l
-    AlOH = (H ** 3 * K1 / den) * Al_w
-    AlOH2 = (H ** 2 * K1 * K2 / den) * Al_w
-    AlOH3 = (H * K1 * K2 * K3 / den) * Al_w
-    AlOH4 = Al_w - (Al + AlOH + AlOH2 + AlOH3)
+        # aluminium speciation
+        K1, K2, K3, K4 = f0.K1, f0.K2, f0.K3, f0.K4
+        den = H ** 4 + H ** 3 * K1 + H ** 2 * K1 * K2 + H * K1 * K2 * K3 + K1 * K2 * K3 * K4
+        Al = (H ** 4 / den) * Al_w                             # mol/l
+        AlOH = (H ** 3 * K1 / den) * Al_w
+        AlOH2 = (H ** 2 * K1 * K2 / den) * Al_w
+        AlOH3 = (H * K1 * K2 * K3 / den) * Al_w
+        AlOH4 = Al_w - (Al + AlOH + AlOH2 + AlOH3)
+
+        if not p.gamma_on:
+            break
+        OH_ic = f0.k_w / H if H > 0.0 else 0.0
+        mu_ic = activity.ionic_strength(Ca, Mg, Na, K, H, OH_ic, HCO3, CO3, An,
+                                        Al, AlOH, AlOH2, AlOH4,
+                                        p.conv_mol, p.conv_Al)
+        _g = activity.gammas(mu_ic, f0.T_K)[activity.SP_H]
+        if abs(_g - gamma_H_ic) <= _IC_PH_RTOL * _g:
+            break                       # the state in hand is consistent with _g
+        gamma_H_ic = _g
+    else:
+        raise ValueError(
+            "initial-condition pH did not converge in %d passes: gamma_H is "
+            "still moving by more than %g relative. This is the fixed point "
+            "H = 10^-pH / gamma_H(mu(H)); a very low pH makes H itself a large "
+            "part of the ionic strength, which is what slows it."
+            % (_IC_PH_MAX_PASSES, _IC_PH_RTOL))
 
     # Silicon
     Si = Si_in
@@ -582,14 +623,11 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     # gamma_on run the exchanger composition handed in at t = 0 is not quite the
     # one the model's own equilibrium would produce from the same totals, and
     # the first few steps relax off it. That is a property of the IC being an
-    # INPUT, not a solve: pH_in, conc_in and f_CEC_in are measurements. Making
-    # ic.py activity-aware is a separate change with its own result shift, and
-    # entangling it here would make neither attributable.
+    # INPUT, not a solve: conc_in and f_CEC_in are measurements, and the six
+    # conversion helpers in ic.py are still written on concentrations.
     #
-    # What IS corrected is everything downstream of the IC: the saturation
-    # states and rates below feed step 0's explicit balance, so leaving them on
-    # concentrations would put one concentration-based step at the head of every
-    # activity-based run.
+    # P6 closed the pH half of that gap -- the loop above now reads pH_in as the
+    # activity it is -- but conc_in and f_CEC_in are still taken at face value.
     if p.gamma_on:
         OH0 = f0.k_w / H if H > 0.0 else 0.0
         mu = activity.ionic_strength(Ca, Mg, Na, K, H, OH0, HCO3, CO3, An,
@@ -600,8 +638,16 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         mu = 0.0
         gam = activity.GAMMA_ONE
     gamma_H = gam[activity.SP_H]
-    # The activity pH of the initial state, from the H the ICs imply.
+    # Both pH series, from the H the loop above settled on. `pH` is the ACTIVITY
+    # pH and should come back equal to pH_sol -- the measured value, method-
+    # corrected -- because that is what H was derived from; the identity is
+    # asserted rather than assumed, since it is the cheapest possible check that
+    # the iteration converged and the two conversions did not cancel wrongly.
+    pH_conc = -np.log10(H / p.conv_mol)
     pH = -np.log10(gamma_H * H / p.conv_mol)
+    assert abs(pH - pH_sol) < 1e-8, (
+        "initial-condition pH did not converge: asked for activity pH %.6f, "
+        "the derived state has %.6f" % (pH_sol, pH))
 
     # Carbonate weathering
     Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / f0.K_CaCO3
@@ -1455,6 +1501,47 @@ def _lerp_forcing(a, b, f):
 
 GAMMA_PICARD_RTOL = 1e-10
 
+# --- P6: reading the measured pH ------------------------------------------
+#
+# Reconciling [H+] with gamma_H at t = 0 is a fixed point:
+#     H = 10^-pH / gamma_H(mu(H))
+# It is iterated rather than solved. Convergence is fast because the ionic
+# strength is dominated by Ca, Mg, Na and K, which are inputs and do not move
+# between passes -- but it is NOT immediate at low pH, where H is itself a
+# significant part of mu, so the loop runs to a tolerance rather than to a
+# fixed count.
+_IC_PH_MAX_PASSES = 40
+_IC_PH_RTOL = 1e-13
+
+# What to subtract from a reported pH to get the pH of the SOIL SOLUTION at
+# field moisture, which is the quantity the model means by pH.
+#
+#   "solution"  the caller has already done this, or is supplying a porewater
+#               pH. Subtracts nothing, and is the default: it is what every run
+#               before P6 assumed, so the default path does not move.
+#
+#   "CaCl2"     0.01 M CaCl2, the standard agronomic method. Subtracts nothing
+#               either, but for a reason rather than by default. Aitken & Moody
+#               (1991), Aust. J. Soil Res. 29, 483-491, measured pH in several
+#               electrolytes against soil solution pH directly and found 0.01 M
+#               CaCl2 the best approximation to it for CULTIVATED soils of
+#               ionic strength above 0.018 M. That is the population this model
+#               is applied to, and SMEW's own benchmark cases sit at ionic
+#               strengths of 1e-2 to 1.6e-1. (For their whole set, including
+#               uncultivated soils of lower ionic strength, 0.002 M CaCl2 was
+#               closer -- so this mapping is right for the intended use, not
+#               universally.)
+#
+#   "H2O"      soil:water suspension. The dilution lowers the ionic strength and
+#               leaves exchangeable H+ and Al3+ on the exchanger, so the reading
+#               comes out HIGHER than the soil solution: reported differences
+#               against CaCl2 run 0.4-0.8 pH units, commonly quoted near 0.5.
+#               0.5 is used here, and it is the crudest number in this file: the
+#               real offset is not a constant, it shrinks as soil EC rises and
+#               the relationship is sigmoidal rather than linear. Treat it as a
+#               default to override per site, not as a property of soils.
+_PH_TO_SOLUTION = {"solution": 0.0, "CaCl2": 0.0, "H2O": 0.5}
+
 
 def step(state, params, now, prev, dt, post_application=True, rock_now=None,
          max_substeps=MAX_SUBSTEPS):
@@ -1608,7 +1695,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite"):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution"):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1651,7 +1738,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     p = _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                         M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                         gamma_on=gamma_on, gamma_picard=gamma_picard,
-                        mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase)
+                        mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase,
+                        pH_method=pH_method)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15

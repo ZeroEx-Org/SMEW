@@ -141,6 +141,11 @@ class SoilParams:
     # is the phase that actually forms below ~100 C; it is ~1.8 log units more
     # soluble, so it precipitates far less readily. See constants.carb_weath_const.
     mg_phase: str = "magnesite"
+    # How the input pH was measured, so it can be converted to the soil-solution
+    # pH the model means. "solution" (default) subtracts nothing and reproduces
+    # every pre-P6 run; "CaCl2" likewise, but on evidence rather than by
+    # default; "H2O" subtracts an offset. See _PH_TO_SOLUTION in biogeochem.py.
+    pH_method: str = "solution"
 
 
 @dataclass(slots=True)
