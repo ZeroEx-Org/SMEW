@@ -411,8 +411,10 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     xi = dry_perc * np.array([v_f_Ca / MM_Ca, v_f_Mg / MM_Mg,
                               v_f_K / MM_K, v_f_Si / MM_Si])  # [mol-conv/g_biomass]
 
-    # carb weathering constants
-    [K_CaCO3, K_MgCO3, r_CaCO3, r_MgCO3, tau_CaCO3, tau_MgCO3] = \
+    # carb weathering constants. The two solubility products are discarded
+    # here on purpose -- they are temperature-dependent as of P5 and are
+    # rebuilt per timestep in biogeochem_balance, alongside k1/k2/k_w.
+    [_, _, r_CaCO3, r_MgCO3, tau_CaCO3, tau_MgCO3] = \
         smew.carb_weath_const(conv_mol)
 
     # depth over which the soil-air CO2 gradient is taken
@@ -431,7 +433,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         K1=K1, K2=K2, K3=K3, K4=K4,
         K_Ca_Mg=K_Ca_Mg, K_Ca_K=K_Ca_K, K_Ca_Na=K_Ca_Na,
         K_Ca_Al=K_Ca_Al, K_Ca_H=K_Ca_H,
-        K_CaCO3=K_CaCO3, K_MgCO3=K_MgCO3, r_CaCO3=r_CaCO3, r_MgCO3=r_MgCO3,
+        r_CaCO3=r_CaCO3, r_MgCO3=r_MgCO3,
         tau_CaCO3=tau_CaCO3, tau_MgCO3=tau_MgCO3,
         mineral=tuple(mineral), number_min=number_min, MM_min=MM_min,
         min_st=min_st, K_sp=K_sp, diss_f=diss_f,
@@ -445,7 +447,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
 
 
 def _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
-             k1, k2, k_w, k_H, DIC_rain):
+             k1, k2, k_w, k_H, K_CaCO3, K_MgCO3, DIC_rain):
     """One StepForcing per timestep.
 
     Built up front rather than on demand because the freezing logic needs to
@@ -457,6 +459,7 @@ def _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
                         Dw=Dw[i], D=D[i], r_het=r_het[i], r_aut=r_aut[i],
                         temp_soil=temp_soil[i], T_K=T_K[i],
                         k1=k1[i], k2=k2[i], k_w=k_w[i], k_H=k_H[i],
+                        K_CaCO3=K_CaCO3[i], K_MgCO3=K_MgCO3[i],
                         DIC_rain=DIC_rain[i])
             for i in range(len(s))]
 
@@ -599,8 +602,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     pH = -np.log10(gamma_H * H / p.conv_mol)
 
     # Carbonate weathering
-    Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / p.K_CaCO3
-    Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / p.K_MgCO3
+    Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / f0.K_CaCO3
+    Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / f0.K_MgCO3
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
                                      f0.s, p.Zr, p.r_CaCO3, p.r_MgCO3,
                                      p.tau_CaCO3, p.tau_MgCO3)
@@ -1184,8 +1187,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # on concentrations, stops firing on any of them. PHREEQC agrees on the
     # direction independently: at Example step 29861 SMEW reads Omega = 1.17
     # where PHREEQC reports SI_calcite = -0.16, i.e. undersaturated.
-    Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / p.K_CaCO3
-    Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / p.K_MgCO3
+    Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / now.K_CaCO3
+    Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / now.K_MgCO3
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
                                      now.s, p.Zr, p.r_CaCO3, p.r_MgCO3,
                                      p.tau_CaCO3, p.tau_MgCO3)
@@ -1651,6 +1654,9 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
 
     # carbonate spec
     [k1, k2, k_w, k_H] = smew.K_C(T_K, conv_mol)
+    # P5: calcite's solubility product varies with temperature like the rest of
+    # the carbonate system. Built here, per step, for the same reason k1 is.
+    [K_CaCO3_t, K_MgCO3_t, _, _, _, _] = smew.carb_weath_const(conv_mol, T_K)
 
     # --- rainwater ------------------------------------------------------------
     Alk_rain = 0                                           # alk
@@ -1666,7 +1672,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                        + k2[i] * k1[i] * CO2_w_rain[i] / (H_rain[i] ** 2))
 
     forcing = _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
-                       k1, k2, k_w, k_H, DIC_rain)
+                       k1, k2, k_w, k_H, K_CaCO3_t, K_MgCO3_t, DIC_rain)
 
     # --- storage --------------------------------------------------------------
     out = {k: np.zeros(nt) for k in STATE_1D}

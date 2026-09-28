@@ -81,8 +81,8 @@ class SoilParams:
     K_Ca_Al: float
     K_Ca_H: float
     # --- carbonate minerals ----------------------------------------------
-    K_CaCO3: float
-    K_MgCO3: float
+    # K_CaCO3/K_MgCO3 are NOT here: they are temperature-dependent and live on
+    # StepForcing, next to k1/k2/k_w. The rates and timescales below are not.
     r_CaCO3: float
     r_MgCO3: float
     tau_CaCO3: float
@@ -165,6 +165,8 @@ class StepForcing:
     k2: float
     k_w: float
     k_H: float
+    K_CaCO3: float               # calcite solubility product at T_K
+    K_MgCO3: float               # Mg-carbonate solubility product at T_K
     DIC_rain: float              # DIC of incoming rainwater [mol-conv/l]
 
 

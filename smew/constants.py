@@ -273,12 +273,51 @@ def min_const(mineral,conv_mol):
  # Carbonate weathering constants  
     
 
-def carb_weath_const(conv_mol):
-    
+def carb_weath_const(conv_mol, T_K=None):
+    """Carbonate solubility products and precipitation/dissolution rates.
+
+    T_K is the soil temperature [K]. Scalar or array, following K_C. Passing it
+    makes CALCITE temperature-dependent; omitting it reproduces the fixed
+    pre-existing value exactly, which is what keeps every other caller
+    (ic.py, the notebooks) bit-identical.
+
+    WHY CALCITE NEEDED THIS. It was pinned at pKsp 8.35 for every soil
+    temperature. Every other equilibrium constant the model carries varies with
+    temperature -- K_C does it properly -- and calcite sets the secondary
+    carbonate term, which is the model's main CO2 LOSS pathway. A fixed value
+    makes the model over-predict saturation, and it does so worst in warm soil:
+    measured against the expression below, Omega_calcite came out 9 % high at
+    2 C, 35 % at 25 C and 44 % at 30 C.
+
+    The expression is Plummer & Busenberg (1982), Geochim. Cosmochim. Acta 46,
+    1011-1040, in the analytic form phreeqc.dat carries verbatim:
+
+        log10 Ksp = A1 + A2*T + A3/T + A4*log10(T)
+
+    Its value at 25 C, -8.480, is independently reproduced by MINTEQA2 at
+    -8.475 -- so this is not one database's opinion.
+
+    MAGNESITE IS DELIBERATELY LEFT FIXED. Its value is disputed across sources
+    (this model -7.46, pitzer.dat -7.834, MINTEQA2 -8.029, a spread of 0.57 log
+    units) and, more importantly, magnesite is the wrong PHASE: below about
+    100 C it is kinetically inhibited and does not form in soils at all. Giving
+    a wrong phase a better temperature term would be polishing the wrong thing.
+    `mg_phase` offers nesquehonite instead; see below.
+    """
     # Carbonate solubility products
     #https://booksite.elsevier.com/9780120885305/appendices/Web_Appendices.pdf
-    K_CaCO3 = 10**(-8.35)*conv_mol**2 # Calcite
-    K_MgCO3 = 10**(-7.46)*conv_mol**2 # Magnesite
+    if T_K is None:
+        K_CaCO3 = 10**(-8.35)*conv_mol**2 # Calcite, fixed (pre-P5 behaviour)
+    else:
+        # Plummer & Busenberg (1982); coefficients as in phreeqc.dat
+        logK = (-171.9065 - 0.077993*T_K + 2839.319/T_K
+                + 71.595*np.log10(T_K))
+        K_CaCO3 = 10**(logK)*conv_mol**2
+    K_MgCO3 = 10**(-7.46)*conv_mol**2 # Magnesite -- see the docstring
+    if T_K is not None:
+        # Broadcast to T_K's shape so every caller gets the same container back,
+        # whether or not the constant actually depends on temperature.
+        K_MgCO3 = K_MgCO3 * np.ones_like(np.asarray(T_K, dtype=float))
     
     #precipitation rate
     # modeling formulation follows https://nora.nerc.ac.uk/id/eprint/511084/1/Kirk%20et%20al%202015%20Geochmica%20et%20Cosmochimica%20Acta.pdf
