@@ -55,11 +55,12 @@ def setup(t_end=6):
     # P5: the carbonate solubility products are temperature-dependent and are
     # built per step, the same way k1/k2 are.
     K_CaCO3_t, K_MgCO3_t = smew.carb_weath_const(kw["conv_mol"], T_K)[:2]
+    K1_t, K2_t, K3_t, K4_t = smew.K_Al(kw["conv_mol"], T_K)
     DIC_rain = np.zeros(len(kw["s"]))
     forcing = biogeochem._forcing(
         kw["s"], kw["v"], kw["I"], kw["L"], kw["T"], Dw, D, kw["r_het"],
         kw["r_aut"], kw["temp_soil"], T_K, k1, k2, k_w, k_H,
-        K_CaCO3_t, K_MgCO3_t, DIC_rain)
+        K_CaCO3_t, K_MgCO3_t, K1_t, K2_t, K3_t, K4_t, DIC_rain)
     state, p, _ = biogeochem._initial_state(
         p, forcing[0], kw["pH_in"], kw["conc_in"], kw["f_CEC_in"], kw["Si_in"],
         kw["CaCO3_in"], kw["MgCO3_in"], kw["M_rock_in"], kw["rock_f_in"],

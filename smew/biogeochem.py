@@ -386,8 +386,9 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     # [g/mol-conv]: Molar masses
     [MM_Mg, MM_Ca, MM_Na, MM_K, MM_Si, MM_C, MM_Anions, MM_Al] = smew.MM(conv_mol)
 
-    # Aluminium speciation
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol)
+    # Aluminium speciation. Discarded here on purpose -- temperature-dependent
+    # as of P5b, rebuilt per timestep in biogeochem_balance.
+    _ = smew.K_Al(conv_mol)
 
     # CEC Gaines-Thomas constants
     #
@@ -430,7 +431,6 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         n=n, Zr=Zr, CEC_tot=CEC_tot, Z_CO2=Z_CO2,
         k_v=k_v, RAI=RAI, root_d=root_d, xi=xi,
         CO2_atm=smew.CO2_atm(conv_mol),
-        K1=K1, K2=K2, K3=K3, K4=K4,
         K_Ca_Mg=K_Ca_Mg, K_Ca_K=K_Ca_K, K_Ca_Na=K_Ca_Na,
         K_Ca_Al=K_Ca_Al, K_Ca_H=K_Ca_H,
         r_CaCO3=r_CaCO3, r_MgCO3=r_MgCO3,
@@ -447,7 +447,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
 
 
 def _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
-             k1, k2, k_w, k_H, K_CaCO3, K_MgCO3, DIC_rain):
+             k1, k2, k_w, k_H, K_CaCO3, K_MgCO3, K1, K2, K3, K4, DIC_rain):
     """One StepForcing per timestep.
 
     Built up front rather than on demand because the freezing logic needs to
@@ -460,6 +460,7 @@ def _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
                         temp_soil=temp_soil[i], T_K=T_K[i],
                         k1=k1[i], k2=k2[i], k_w=k_w[i], k_H=k_H[i],
                         K_CaCO3=K_CaCO3[i], K_MgCO3=K_MgCO3[i],
+                        K1=K1[i], K2=K2[i], K3=K3[i], K4=K4[i],
                         DIC_rain=DIC_rain[i])
             for i in range(len(s))]
 
@@ -520,7 +521,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         raise ValueError("Not enough cations for this alkalinity")
 
     # aluminium speciation
-    K1, K2, K3, K4 = p.K1, p.K2, p.K3, p.K4
+    K1, K2, K3, K4 = f0.K1, f0.K2, f0.K3, f0.K4
     den = H ** 4 + H ** 3 * K1 + H ** 2 * K1 * K2 + H * K1 * K2 * K3 + K1 * K2 * K3 * K4
     Al = (H ** 4 / den) * Al_w                             # mol/l
     AlOH = (H ** 3 * K1 / den) * Al_w
@@ -765,7 +766,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # At gamma = 1 this is an exact identity, not an approximation to it.
     (k1, k2, k_w, K1, K2, K3, K4,
      K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H) = activity.effective_constants(
-        gam, now.k1, now.k2, now.k_w, p.K1, p.K2, p.K3, p.K4,
+        gam, now.k1, now.k2, now.k_w, now.K1, now.K2, now.K3, now.K4,
         p.K_Ca_Mg, p.K_Ca_K, p.K_Ca_Na, p.K_Ca_Al, p.K_Ca_H)
     gamma_H = gam[activity.SP_H]
 
@@ -1657,6 +1658,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     # P5: calcite's solubility product varies with temperature like the rest of
     # the carbonate system. Built here, per step, for the same reason k1 is.
     [K_CaCO3_t, K_MgCO3_t, _, _, _, _] = smew.carb_weath_const(conv_mol, T_K)
+    # P5b: the aluminium ladder, likewise.
+    [K1_t, K2_t, K3_t, K4_t] = smew.K_Al(conv_mol, T_K)
 
     # --- rainwater ------------------------------------------------------------
     Alk_rain = 0                                           # alk
@@ -1672,7 +1675,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                        + k2[i] * k1[i] * CO2_w_rain[i] / (H_rain[i] ** 2))
 
     forcing = _forcing(s, v, I, L, T, Dw, D, r_het, r_aut, temp_soil, T_K,
-                       k1, k2, k_w, k_H, K_CaCO3_t, K_MgCO3_t, DIC_rain)
+                       k1, k2, k_w, k_H, K_CaCO3_t, K_MgCO3_t,
+                       K1_t, K2_t, K3_t, K4_t, DIC_rain)
 
     # --- storage --------------------------------------------------------------
     out = {k: np.zeros(nt) for k in STATE_1D}

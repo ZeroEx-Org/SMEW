@@ -402,20 +402,55 @@ def K_GT_CEC(soil, conv_mol):
 #------------------------------------------------------------------------------
  # Aluminium speciation (pag. 398 Weil and Brady)
 
-def K_Al(conv_mol):
-              
-    pK1 = 5 
-    pK2 = 5.1 
-    pK3 = 6.7 
-    pK4 = 6.2
-    K1 = 10**(-pK1)*conv_mol
-    K2 = 10**(-pK2)*conv_mol
-    K3 = 10**(-pK3)*conv_mol
-    K4 = 10**(-pK4)*conv_mol
-   
-    K_Al = [K1, K2, K3, K4]
-                                          
-    return(K_Al)
+# Aluminium hydrolysis, CUMULATIVE reactions Al+3 + n H2O = Al(OH)n + n H+,
+# as the analytic coefficients A1 + A2*T + A3/T + A4*log10(T). Taken verbatim
+# from phreeqc.dat, which carries the Nordstrom & May compilation.
+_AL_ANALYTIC = (
+    (-38.253,  0.0,   -656.27,  14.327),   # AlOH+2
+    ( 88.500,  0.0,  -9391.60, -27.121),   # Al(OH)2+
+    (226.374,  0.0, -18247.80, -73.597),   # Al(OH)3
+    ( 51.578,  0.0, -11168.90, -14.865),   # Al(OH)4-
+)
+
+
+def K_Al(conv_mol, T_K=None):
+    """Aluminium hydrolysis constants, STEPWISE: K_n = [Al(OH)n][H+]/[Al(OH)n-1].
+
+    T_K is the soil temperature [K]. Scalar or array, following K_C. Omitting it
+    returns the fixed values this model has always used (Weil & Brady, The
+    Nature and Properties of Soils, p.398), which is what keeps ic.py and the
+    notebooks bit-identical.
+
+    WHY TEMPERATURE MATTERS HERE. The fixed values are, to two decimals, exactly
+    phreeqc.dat's at 25 C -- so they were never wrong, they were just frozen at
+    a temperature most soils are nowhere near. Over 5-25 C the real constants
+    move by up to 2.25 log units on the cumulative Al(OH)3 step. A model run at
+    8 C was using 25 C chemistry for the one element whose speciation controls
+    exchanger competition, toxicity, and gibbsite saturation.
+
+    ADOPTING THIS SET ALSO MOVES TWO VALUES AT 25 C, and that is deliberate.
+    Converted to stepwise, phreeqc.dat gives -5.00, -5.11, -6.83, -5.72 against
+    this model's -5.00, -5.10, -6.70, -6.20. The first two agree; K3 differs by
+    0.13 and K4 by 0.48 log units. Anchoring the temperature shape to the old
+    25 C values instead would produce a ladder internally inconsistent with any
+    published set, so the whole set is taken rather than spliced. Note the
+    ladder is far from uniform in temperature sensitivity: over 5-35 C, K2 moves
+    1.21 and K3 1.04 log units, while K4 moves only 0.14.
+    """
+    if T_K is None:
+        pK1, pK2, pK3, pK4 = 5, 5.1, 6.7, 6.2
+        K1 = 10**(-pK1)*conv_mol
+        K2 = 10**(-pK2)*conv_mol
+        K3 = 10**(-pK3)*conv_mol
+        K4 = 10**(-pK4)*conv_mol
+        return [K1, K2, K3, K4]
+
+    T = np.asarray(T_K, dtype=float)
+    # cumulative log betas, then differenced into the stepwise constants the
+    # model's aluminium ladder is written in
+    beta = [a[0] + a[1]*T + a[2]/T + a[3]*np.log10(T) for a in _AL_ANALYTIC]
+    step = [beta[0], beta[1]-beta[0], beta[2]-beta[1], beta[3]-beta[2]]
+    return [10**x * conv_mol for x in step]
 
 #------------------------------------------------------------------------------
  # carbonate speciation [Stumm and Morgan, 1996]

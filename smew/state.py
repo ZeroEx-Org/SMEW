@@ -70,10 +70,8 @@ class SoilParams:
     # --- atmosphere ------------------------------------------------------
     CO2_atm: float
     # --- aluminium hydrolysis --------------------------------------------
-    K1: float
-    K2: float
-    K3: float
-    K4: float
+    # K1..K4 are NOT here: they are temperature-dependent as of P5b and live on
+    # StepForcing, next to k1/k2/k_w and the carbonate solubility products.
     # --- Gaines-Thomas cation exchange selectivity ------------------------
     K_Ca_Mg: float
     K_Ca_K: float
@@ -167,6 +165,10 @@ class StepForcing:
     k_H: float
     K_CaCO3: float               # calcite solubility product at T_K
     K_MgCO3: float               # Mg-carbonate solubility product at T_K
+    K1: float                    # aluminium hydrolysis, stepwise, at T_K
+    K2: float
+    K3: float
+    K4: float
     DIC_rain: float              # DIC of incoming rainwater [mol-conv/l]
 
 
