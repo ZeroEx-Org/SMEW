@@ -366,7 +366,8 @@ def _jacobian_8log_numba(
 def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                     gamma_on=False, gamma_picard=0,
-                    mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15):
+                    mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
+                    mg_phase="magnesite"):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -442,7 +443,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         tt_app=int(t_app / dt) if has_rock else 0,
         has_rock=has_rock,
         gamma_on=bool(gamma_on), gamma_picard=int(gamma_picard),
-        mu_ref_CEC=float(mu_ref_CEC),
+        mu_ref_CEC=float(mu_ref_CEC), mg_phase=str(mg_phase),
     )
 
 
@@ -1607,7 +1608,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite"):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1615,6 +1616,16 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     The 34-argument signature is unchanged and the returned series are unchanged.
     Internally this is now a loop over `step`, against one `SoilParams` resolved
     once and one `StepForcing` per timestep; see smew/state.py.
+
+    mg_phase is keyword-only and selects which magnesium carbonate may
+    precipitate. "magnesite" is the default and is bit-identical to every
+    result produced before it existed. "nesquehonite" is the phase that
+    actually forms in soil below ~100 C -- magnesite is kinetically inhibited
+    there -- and is ~1.8 log units more soluble, so it precipitates far less
+    readily. It is off by default deliberately: switch it on for a site where
+    an Mg carbonate has actually been identified, not on the general argument.
+    Note that r_MgCO3 and tau_MgCO3 were tuned under the magnesite assumption
+    and are NOT adjusted with the phase.
 
     gamma_on is keyword-only and defaults to False, which reproduces every
     result produced before F4 BIT FOR BIT -- `activity.effective_constants` at
@@ -1640,7 +1651,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     p = _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                         M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                         gamma_on=gamma_on, gamma_picard=gamma_picard,
-                        mu_ref_CEC=mu_ref_CEC)
+                        mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -1657,7 +1668,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     [k1, k2, k_w, k_H] = smew.K_C(T_K, conv_mol)
     # P5: calcite's solubility product varies with temperature like the rest of
     # the carbonate system. Built here, per step, for the same reason k1 is.
-    [K_CaCO3_t, K_MgCO3_t, _, _, _, _] = smew.carb_weath_const(conv_mol, T_K)
+    [K_CaCO3_t, K_MgCO3_t, _, _, _, _] = smew.carb_weath_const(conv_mol, T_K,
+                                                              mg_phase)
     # P5b: the aluminium ladder, likewise.
     [K1_t, K2_t, K3_t, K4_t] = smew.K_Al(conv_mol, T_K)
 

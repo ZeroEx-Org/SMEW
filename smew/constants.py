@@ -273,7 +273,7 @@ def min_const(mineral,conv_mol):
  # Carbonate weathering constants  
     
 
-def carb_weath_const(conv_mol, T_K=None):
+def carb_weath_const(conv_mol, T_K=None, mg_phase="magnesite"):
     """Carbonate solubility products and precipitation/dissolution rates.
 
     T_K is the soil temperature [K]. Scalar or array, following K_C. Passing it
@@ -297,13 +297,42 @@ def carb_weath_const(conv_mol, T_K=None):
     Its value at 25 C, -8.480, is independently reproduced by MINTEQA2 at
     -8.475 -- so this is not one database's opinion.
 
-    MAGNESITE IS DELIBERATELY LEFT FIXED. Its value is disputed across sources
-    (this model -7.46, pitzer.dat -7.834, MINTEQA2 -8.029, a spread of 0.57 log
-    units) and, more importantly, magnesite is the wrong PHASE: below about
-    100 C it is kinetically inhibited and does not form in soils at all. Giving
-    a wrong phase a better temperature term would be polishing the wrong thing.
-    `mg_phase` offers nesquehonite instead; see below.
+    THE MAGNESIUM PHASE IS A CHOICE, and the default keeps the old behaviour.
+
+    `mg_phase="magnesite"` (default) uses the fixed -7.46 this model has always
+    used. Its value is disputed across sources -- this model -7.46, pitzer.dat
+    -7.834, MINTEQA2 -8.029, a spread of 0.57 log units -- and it is left fixed
+    rather than improved, because the deeper problem is not the number.
+
+    `mg_phase="nesquehonite"` (MgCO3:3H2O) is the phase that actually forms.
+    Below roughly 100 C, anhydrous magnesite is kinetically inhibited and does
+    not precipitate; what forms instead is nesquehonite, ageing through
+    dypingite to hydromagnesite. So on a Mg-rich feedstock the default is
+    modelling a mineral that is not there, at a solubility ~1.8 log units too
+    LOW -- i.e. it precipitates Mg carbonate far too readily.
+
+    Nesquehonite is OFF by default because the evidence has to come first: it
+    should be switched on for a site where an Mg carbonate has actually been
+    identified, not on the general argument above. Turning it on changes
+    results; see the `mg_phase` note in biogeochem_balance.
+
+    Values for nesquehonite: log Ksp = -5.621 at 25 C with dissolution enthalpy
+    -5.789 kcal/mol, from MINTEQA2 (as carried by MIN3P's mineral.dbs), applied
+    through van't Hoff. pitzer.dat gives -5.167 for the same phase, so treat the
+    0.45 log-unit spread between compilations as the uncertainty on this number.
+    The three waters of hydration are not tracked: precipitating a few micromoles
+    of nesquehonite removes a negligible fraction of the ~55 mol/l of solvent,
+    and Omega keeps the same form because a_H2O^3 is ~1 in soil solution.
+
+    NOT ADJUSTED WITH THE PHASE: r_MgCO3 and tau_MgCO3, the precipitation rate
+    and dissolution timescale, were tuned to reproduce experiments under the
+    magnesite assumption. They are carried over unchanged, which makes
+    nesquehonite a thermodynamic switch rather than a fully re-parameterised
+    phase. Anyone turning it on should expect to revisit them.
     """
+    if mg_phase not in ("magnesite", "nesquehonite"):
+        raise ValueError("mg_phase must be 'magnesite' or 'nesquehonite', "
+                         "got %r" % (mg_phase,))
     # Carbonate solubility products
     #https://booksite.elsevier.com/9780120885305/appendices/Web_Appendices.pdf
     if T_K is None:
@@ -313,11 +342,23 @@ def carb_weath_const(conv_mol, T_K=None):
         logK = (-171.9065 - 0.077993*T_K + 2839.319/T_K
                 + 71.595*np.log10(T_K))
         K_CaCO3 = 10**(logK)*conv_mol**2
-    K_MgCO3 = 10**(-7.46)*conv_mol**2 # Magnesite -- see the docstring
-    if T_K is not None:
-        # Broadcast to T_K's shape so every caller gets the same container back,
-        # whether or not the constant actually depends on temperature.
-        K_MgCO3 = K_MgCO3 * np.ones_like(np.asarray(T_K, dtype=float))
+    if mg_phase == "magnesite":
+        K_MgCO3 = 10**(-7.46)*conv_mol**2   # fixed -- see the docstring
+        if T_K is not None:
+            # Broadcast to T_K's shape so every caller gets the same container
+            # back, whether or not the constant depends on temperature.
+            K_MgCO3 = K_MgCO3 * np.ones_like(np.asarray(T_K, dtype=float))
+    else:
+        # Nesquehonite, MgCO3:3H2O = Mg+2 + CO3-2 + 3 H2O.
+        # van't Hoff from MINTEQA2's 25 C value and dissolution enthalpy:
+        #   log K(T) = log K(298.15) - dH/(2.303 R) * (1/T - 1/298.15)
+        _LK25, _DH = -5.621, -5.789*4184.0          # [-], [J/mol]
+        if T_K is None:
+            logK = _LK25
+        else:
+            T = np.asarray(T_K, dtype=float)
+            logK = _LK25 - (_DH/(2.303*8.314))*(1.0/T - 1.0/298.15)
+        K_MgCO3 = 10**(logK)*conv_mol**2
     
     #precipitation rate
     # modeling formulation follows https://nora.nerc.ac.uk/id/eprint/511084/1/Kirk%20et%20al%202015%20Geochmica%20et%20Cosmochimica%20Acta.pdf

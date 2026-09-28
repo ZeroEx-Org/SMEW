@@ -136,6 +136,11 @@ class SoilParams:
     # strength once per run, and brought back down at each step's own mu. Only
     # the difference between the two matters. An estimate; see activity.py.
     mu_ref_CEC: float = 5.0e-3
+    # Which magnesium carbonate the model is allowed to precipitate.
+    # "magnesite" is the historical default and is bit-identical. "nesquehonite"
+    # is the phase that actually forms below ~100 C; it is ~1.8 log units more
+    # soluble, so it precipitates far less readily. See constants.carb_weath_const.
+    mg_phase: str = "magnesite"
 
 
 @dataclass(slots=True)
