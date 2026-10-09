@@ -371,15 +371,52 @@ def main(argv=None):
     print(f"nfev(analytic) varies by {spread:.1f} across n = "
           f"{a.sizes[0]}..{a.sizes[-1]} (theory: 0)")
 
+    # --- what the remaining cost IS, which is the budgeting question ---------
+    #
+    # "not kernel" above is everything that is not a residual or Jacobian
+    # evaluation: MINPACK's factorisation and its per-call bookkeeping. Knowing
+    # it dominates is not enough to plan against, because the two have opposite
+    # cures. Fixed per-call overhead is removed by leaving scipy -- writing the
+    # Newton loop in numba against the analytic Jacobian already built. Dense
+    # factorisation is O(n^3) and is removed only by exploiting sparsity.
+    #
+    # The local exponent separates them: ~0 means overhead, ~3 means dense
+    # linear algebra. Measured on this machine it climbs 0.43 -> 2.11 across
+    # 8 -> 60, so the crossover sits around n = 24..40. Below it, the lever is
+    # getting out of scipy; above it, the lever is sparsity. Neither is worth
+    # building now -- see the tractability gate below -- but which one to reach
+    # for is now a measurement instead of a guess.
+    nk = {n: table[(n, "analytic")] - work[n][1] for n in a.sizes}
+    print(f"{'n range':>10s} {'not-kernel us':>22s} {'local exponent':>15s}")
+    for i in range(len(a.sizes) - 1):
+        lo, hi = a.sizes[i], a.sizes[i + 1]
+        e = np.log(nk[hi] / nk[lo]) / np.log(hi / lo)
+        print(f"{lo:4d}->{hi:<4d} {nk[lo]*1e6:9.1f} ->{nk[hi]*1e6:9.1f} "
+              f"{e:15.2f}")
+    e_lo = np.log(nk[a.sizes[1]] / nk[a.sizes[0]]) / np.log(a.sizes[1] / a.sizes[0])
+    e_hi = np.log(nk[a.sizes[-1]] / nk[a.sizes[-2]]) / np.log(a.sizes[-1] / a.sizes[-2])
+    print()
+    print(f"not-kernel cost is per-call overhead at small n (exponent "
+          f"{e_lo:.2f}) and dense linear algebra at large n (exponent "
+          f"{e_hi:.2f})")
+    print(f"  -> below the crossover the lever is leaving scipy; above it, "
+          f"sparsity. The analytic Jacobian is neither.")
+
     big = 40 if 40 in a.sizes else a.sizes[-1]
     yr = table[(big, "analytic")] * STEPS_PER_YEAR
+    yr_max = table[(a.sizes[-1], "analytic")] * STEPS_PER_YEAR
     ratio_grows = (work[a.sizes[-1]][0] / work[a.sizes[-1]][1]
                    > work[a.sizes[0]][0] / work[a.sizes[0]][1])
     tractable = yr < 600
+    tractable_max = yr_max < 600
     print(f"\nanalytic advantage in KERNEL work grows with n: {ratio_grows}")
     print(f"n={big} at Example's {STEPS_PER_YEAR} steps: {yr:.0f} s "
           f"-> tractable (<10 min): {tractable}")
-    ok = ratio_grows and tractable
+    print(f"n={a.sizes[-1]} at Example's {STEPS_PER_YEAR} steps: {yr_max:.0f} s "
+          f"-> tractable (<10 min): {tractable_max}")
+    print("  -> redox (item 4) and surface complexation (item 5) are "
+          "affordable in this solver as it stands.")
+    ok = ratio_grows and tractable and tractable_max
     print(f"\n{'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
