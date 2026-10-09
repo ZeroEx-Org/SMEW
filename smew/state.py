@@ -202,7 +202,7 @@ STATE_1D = (
     "mu", "gamma_H",
     # F2 positivity bookkeeping, all zero on a well-behaved step
     "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
-    "clip_An", "clip_C", "clip_Fe", "clip_CaCO3", "clip_MgCO3",
+    "clip_An", "clip_C", "clip_Fe", "clip_CaCO3", "clip_MgCO3", "clip_psd",
     "dt_max", "n_substeps",
 )
 STATE_MIN = ("EW", "Wr", "Omega", "M_min", "rock_f",
@@ -276,6 +276,12 @@ class SoilState:
     clip_An: float = 0.0; clip_C: float = 0.0; clip_Fe: float = 0.0
     clip_CaCO3: float = 0.0; clip_MgCO3: float = 0.0
     clip_M_min: np.ndarray = None
+    # clip_psd is the same idea for the OTHER account of the rock [g]: mass
+    # dropped from the particle size distribution because a diameter class
+    # shrank to d <= 0. M_rock and sum(psd*delta_d) are two representations of
+    # one rock and agree to first order by construction; this is the only term
+    # that makes them disagree, so it is recorded rather than absorbed.
+    clip_psd: float = 0.0
     # dt_max is the largest timestep this state could have been advanced by
     # without any pool going negative [d]; n_substeps is how many sub-intervals
     # the step actually needed (1 when nothing was wrong).

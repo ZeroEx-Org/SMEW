@@ -77,7 +77,7 @@ SCHEMA_1D = [                                        # shape (n_steps,)
     # F2: what the positivity limiter had to do. All zero on a healthy run, so
     # these are also the cheapest assertion that a run stayed well-posed.
     "clip_Ca", "clip_Mg", "clip_K", "clip_Na", "clip_Al", "clip_Si",
-    "clip_An", "clip_C", "clip_Fe", "clip_CaCO3", "clip_MgCO3",
+    "clip_An", "clip_C", "clip_Fe", "clip_CaCO3", "clip_MgCO3", "clip_psd",
     "dt_max", "n_substeps",
     # F3.1: what the nonlinear solve did at each step. NaN where a frost meant
     # no solve happened -- 0 is a real MINPACK exit code, so it cannot double as

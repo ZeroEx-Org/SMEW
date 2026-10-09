@@ -4,6 +4,7 @@
 Created on Mon Dec 16 14:34:44 2019
 """
 
+import warnings
 from dataclasses import fields, replace
 
 import numpy as np
@@ -474,6 +475,76 @@ _FORCING_FIELDS = tuple(f.name for f in fields(StepForcing))
 # Initial conditions
 # ---------------------------------------------------------------------------
 
+# How far the particle size distribution may miss summing to 1 before it is
+# worth saying so out loud. 1e-9 is roundoff on a hand-typed list; the real
+# cases that fail do so at 1e-3, three orders of magnitude clear of it.
+PSD_SUM_TOL = 1e-9
+
+
+def _validate_psd(d_in, psd_perc_in):
+    """Put the diameter classes in order and check they describe one rock.
+
+    Two assumptions have always been made about `d_in` and `psd_perc_in` and
+    neither has ever been checked, because nothing downstream fails loudly when
+    they are broken:
+
+      sorted   `delta_d = np.insert(np.diff(d), 0, d[0])` is a bin WIDTH, so it
+               is only a width if `d` ascends. Out of order it goes negative,
+               and so does `psd = psd_perc * M_rock / delta_d`. Today that is
+               invisible, because `delta_d` cancels in every one of its four
+               uses -- it is created as 1/delta_d inside `psd` and every reader
+               takes the product `psd * delta_d`, which is just class mass. The
+               cancellation is exact: sorting the real unsorted cases moves the
+               answer by at most 3e-14, pure summation order. But a negative
+               bin width is a trap for the first reader that does not multiply
+               it back out, so the order is fixed here rather than relied upon.
+               Measured: all five Bottles_tePas treatments arrive unsorted, from
+               WebPlotDigitizer CDF data read in file order.
+
+      sums to 1 `psd_perc` is the mass fraction per class, so the geometric rock
+               `sum(psd * delta_d)` equals `M_rock` only if it sums to 1. When it
+               does not, surface area -- and every dissolution flux through it --
+               is computed for a rock of the wrong mass, permanently and
+               silently. Measured: Bottles_tePas anorthite sums to 0.997506, so
+               its geometric rock starts 0.25% light and stays there, which is
+               178x the mass that actually dissolves in that case.
+
+    The sum is a warning, not an error: 0.9975 is a digitisation artefact, not a
+    different rock, and refusing to run would break a published benchmark over
+    a rounding error. Order is repaired silently because it is provably
+    result-neutral. Duplicates are fatal -- a zero bin width divides by zero.
+    """
+    d = np.asarray(d_in, dtype=float).ravel()
+    w = np.asarray(psd_perc_in, dtype=float).ravel()
+    if d.shape != w.shape:
+        raise ValueError(
+            "d_in and psd_perc_in must be the same length, got %d and %d"
+            % (d.size, w.size))
+    if d.size == 0:
+        raise ValueError("d_in is empty: the rock has no diameter classes")
+    if not np.all(np.isfinite(d)) or np.any(d <= 0):
+        raise ValueError("d_in must be finite and strictly positive, got %r"
+                         % (d,))
+
+    order = np.argsort(d, kind="stable")
+    d, w = d[order], w[order]
+    if np.any(np.diff(d) == 0.0):
+        raise ValueError(
+            "d_in has repeated diameters, which give a zero bin width in "
+            "delta_d = diff(d) and divide by zero in psd: %r" % (d,))
+
+    total = float(np.sum(w))
+    if abs(total - 1.0) > PSD_SUM_TOL:
+        warnings.warn(
+            "psd_perc_in sums to %.6f, not 1: the particle size distribution "
+            "accounts for %.4f%% of M_rock, so surface area and every "
+            "dissolution flux through it are computed for a rock that much "
+            "lighter than the one the mass balance carries."
+            % (total, 100.0 * total),
+            RuntimeWarning, stacklevel=3)
+    return d, w
+
+
 def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
                    M_rock_in, rock_f_in, d_in, psd_perc_in, SSA_in, t_app,
                    s, T, L, keyword_add):
@@ -673,12 +744,12 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         M_min_a = rock_f_a * M_rock_a                      # [g/m2]
         M_iner = M_rock_a * (1 - np.sum(rock_f_a))         # [g/m2]
 
-        # diameter classes
-        d_a = np.asarray(d_in, dtype=float).copy()         # [m]
+        # diameter classes. Sorted and checked first -- see _validate_psd.
+        d_a, psd_perc_a = _validate_psd(d_in, psd_perc_in)  # [m], [-]
         delta_d_a = np.insert(np.diff(d_a), 0, d_a[0])
 
         # particle size distribution
-        psd_a = psd_perc_in * M_rock_a / delta_d_a         # [g/m]
+        psd_a = psd_perc_a * M_rock_a / delta_d_a          # [g/m]
 
         # refinement of fractal constant based on measured SSA
         a = p.a
@@ -738,6 +809,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         EW=EW, Wr=Wr, Omega=Omega,
         d=d, delta_d=delta_d, lamb=lamb, SSA=SSA, psd=psd,
         clip_M_min=np.zeros(p.number_min),
+        clip_psd=0.0,
     )
     return state, p, applied
 
@@ -1246,6 +1318,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     d, delta_d = state.d, state.delta_d
     lamb, SSA, psd, SA = state.lamb, state.SSA, state.psd, state.SA
     clip_M_min = np.zeros(p.number_min)
+    clip_psd = 0.0
     Omega = np.zeros(p.number_min)
     Wr = np.zeros(p.number_min)
     EW = np.zeros(p.number_min)
@@ -1299,6 +1372,22 @@ def _step_once(state, params, now, prev, dt, post_application=True,
             d_shrink = np.sum(state.rock_f * state.Wr * p.MM_min
                               / p.rho_rock) * dt                   # [m]
             d = state.d - 2 * d_shrink * state.lamb                # [m]
+            # A class whose particles have shrunk to nothing. psd_evol's
+            # `if d[k]>0` guard leaves such a class at psd = 0, and that cutoff
+            # is the one place the geometric account of the rock can lose mass
+            # the stoichiometric account keeps. So it is recorded, the same way
+            # F2 records clip_M_min, instead of being assumed harmless.
+            #
+            # Measured, it is zero everywhere, and for a better reason than the
+            # classes being small: psd scales as (d/d_0)**3, so by the time d
+            # crosses zero the cube has already underflowed. Vulkaneifel is the
+            # only case that exhausts any class -- 16 of its 100 -- and each one
+            # arrives at the cutoff with d ~ 3e-15 m and psd already exactly 0.
+            # The guard discards nothing; the mass left continuously. Keeping
+            # the measurement is what makes that a fact rather than a hope.
+            exhausted = d <= 0.0
+            clip_psd = float(np.sum(state.psd[exhausted]
+                                    * state.delta_d[exhausted]))   # [g]
             d = np.where(d < 0, 0.0, d)
             delta_d = np.insert(np.diff(d), 0, d[0])               # [m]
             [lamb, SSA, psd, SA] = smew.psd_evol(
@@ -1333,6 +1422,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         clip_Al=clip_Al, clip_Si=clip_Si, clip_An=clip_An, clip_C=clip_C,
         clip_Fe=clip_Fe,
         clip_CaCO3=clip_CaCO3, clip_MgCO3=clip_MgCO3, clip_M_min=clip_M_min,
+        clip_psd=clip_psd,
         dt_max=dt_max, n_substeps=1.0,
     )
     # Is that clipping meaningful, or is it roundoff on an empty pool?
@@ -1961,6 +2051,13 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         "clip_Fe": out["clip_Fe"],
         "clip_CaCO3": out["clip_CaCO3"], "clip_MgCO3": out["clip_MgCO3"],
         "clip_M_min": out["clip_M_min"],
+        # clip_psd is the geometric twin of clip_M_min [g]: mass dropped from
+        # the particle size distribution because a diameter class shrank to
+        # zero. It is NOT a ledger row -- the ledger balances moles of elements,
+        # and the stoichiometric rock (M_rock) is what feeds it. This is the
+        # surface-area account's own loss, and the only way the two accounts of
+        # the rock can drift apart. See tests/check_psd.py.
+        "clip_psd": out["clip_psd"],
         # dt_max: the largest step that would have kept every pool
         # non-negative [d]. n_substeps: how many sub-intervals the step needed
         # (1 = none, 0 = sub-dividing failed and the clamp was used).
