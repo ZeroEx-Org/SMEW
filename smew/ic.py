@@ -154,7 +154,12 @@ def f_CEC_and_conc_to_K(f_CEC_in, conc_in, pH_in, soil, conv_mol,conv_Al):
     K_Ca_Mg = (f_Ca/Ca)*(Mg/f_Mg)
     K_Ca_K = (f_Ca/Ca)*(K/f_K)**2
     K_Ca_Na = (f_Ca/Ca)*(Na/f_Na)**2
-    K_Ca_Al = (f_Ca/Ca)**3*(f_Al/(Al/conv_Al))**2
+    # Al/f_Al, not f_Al/Al: the inverse of the Mg/K/Na/H pattern above, because eq 11
+    # (biogeochem.py, and ic.py's own conc_to_f_CEC) is f_Al = (Al/conv_Al)*(f_Ca^3/(K Ca^3))^(1/2).
+    # It read (f_Al/(Al/conv_Al))**2 until 2026-10, so the calibrated K did not reproduce
+    # its own calibration data: on the first step the solver moved Al between exchanger and
+    # solution by up to 4 orders of magnitude (Projects/MOMBAK, the only caller).
+    K_Ca_Al = (f_Ca/Ca)**3*((Al/conv_Al)/f_Al)**2
     K_Ca_H = (f_Ca/Ca)*(H/f_H)**2 
     
     K_CEC = [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H]
