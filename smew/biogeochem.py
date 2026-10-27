@@ -451,7 +451,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                     gamma_on=False, gamma_picard=0,
                     mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
-                    mg_phase="magnesite", pH_method="solution"):
+                    mg_phase="magnesite", pH_method="solution", reapply=None):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -460,6 +460,18 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     """
     has_rock = M_rock_in > 0
     number_min = len(mineral) if has_rock else 1
+
+    # second application (see SoilParams.n_blocks)
+    n_blocks, tt_app_re = 1, -1
+    if reapply is not None:
+        t_app_re, M_rock_re = reapply
+        if not has_rock:
+            raise ValueError("reapply needs a first application (M_rock_in > 0)")
+        if not M_rock_re > 0:
+            raise ValueError(f"reapply mass must be > 0 [g/m2], got {M_rock_re}")
+        if not t_app_re > t_app:
+            raise ValueError(f"reapply time {t_app_re} d must be after t_app {t_app} d")
+        n_blocks, tt_app_re = 2, int(t_app_re / dt)
 
     MM_min = np.zeros(number_min)
     min_st = np.zeros([number_min, 7])   # [Ca, Mg, K, Na, Al, Si, Fe]
@@ -523,12 +535,13 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         mineral=tuple(mineral), number_min=number_min, MM_min=MM_min,
         min_st=min_st, K_sp=K_sp, diss_f=diss_f,
         rho_rock=3 * 1e6, a=a, b=b, M_iner=0.0,
-        n_d_cl=len(d_in) if has_rock else 1,
+        n_d_cl=(len(d_in) * n_blocks) if has_rock else 1,
         tt_app=int(t_app / dt) if has_rock else 0,
         has_rock=has_rock,
         gamma_on=bool(gamma_on), gamma_picard=int(gamma_picard),
         mu_ref_CEC=float(mu_ref_CEC), mg_phase=str(mg_phase),
         pH_method=str(pH_method),
+        n_blocks=n_blocks, tt_app_re=tt_app_re,
     )
 
 
@@ -562,6 +575,51 @@ _FORCING_FIELDS = tuple(f.name for f in fields(StepForcing))
 # worth saying so out loud. 1e-9 is roundoff on a hand-typed list; the real
 # cases that fail do so at 1e-3, three orders of magnitude clear of it.
 PSD_SUM_TOL = 1e-9
+
+
+def _block_widths(d, n_blocks):
+    """Class widths per application block: each block's own insert(diff(d), 0, d[0]).
+
+    One application is one block and that formula applied to the whole array. With a
+    second application the classes are two blocks of sorted diameters, and the
+    formula across the seam would make the first class of block 2 as wide as the
+    jump from block 1's largest grain to block 2's smallest.
+    """
+    return np.concatenate([np.insert(np.diff(b), 0, b[0]) for b in np.split(d, n_blocks)])
+
+
+def _fresh_block(p, M_rock, rock_f_in, d_in, psd_perc_in):
+    """Geometry of a freshly applied rock mass, as _initial_state builds it, with `a` as
+    already refined there (it does not depend on the applied mass)."""
+    rock_f = np.asarray(rock_f_in, dtype=float)
+    d_b, psd_perc_b = _validate_psd(d_in, psd_perc_in)
+    delta_d_b = np.insert(np.diff(d_b), 0, d_b[0])
+    psd_b = psd_perc_b * M_rock / delta_d_b
+    lamb_b = p.a * d_b ** p.b
+    SSA_b = 6 / (d_b * p.rho_rock) * lamb_b
+    return (rock_f * M_rock, d_b, delta_d_b, lamb_b, SSA_b, psd_b,
+            M_rock * (1 - np.sum(rock_f)))
+
+
+def _reapply(st, p):
+    """Land the second application on state `st`; returns (state, params).
+
+    The new block's classes take the fresh geometry, the minerals and the inert mass
+    gain the new rock, and EW is recomputed from the new surface so that both rock
+    accounts (stoichiometric and geometric, tests/check_psd.py) lose mass from the
+    new rock on the very next step.
+    """
+    M_min_add, d_b, delta_d_b, lamb_b, SSA_b, psd_b, M_iner_add = p.rock_re
+    k = p.n_d_cl - len(d_b)                                 # first class of block 2
+    p = replace(p, M_iner=p.M_iner + M_iner_add)
+    M_min = st.M_min + M_min_add
+    M_rock = np.sum(M_min) + p.M_iner
+    rock_f = M_min / M_rock
+    d, delta_d, lamb, SSA, psd = (x.copy() for x in (st.d, st.delta_d, st.lamb, st.SSA, st.psd))
+    d[k:], delta_d[k:], lamb[k:], SSA[k:], psd[k:] = d_b, delta_d_b, lamb_b, SSA_b, psd_b
+    SA = np.sum(SSA * psd * delta_d)
+    return replace(st, M_min=M_min, M_rock=M_rock, rock_f=rock_f, d=d, delta_d=delta_d,
+                   lamb=lamb, SSA=SSA, psd=psd, SA=SA, EW=st.Wr * SA * rock_f), p
 
 
 def _validate_psd(d_in, psd_perc_in):
@@ -844,6 +902,11 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         lamb_a = a * d_a ** p.b                            # [-]
         SSA_a = 6 / (d_a * p.rho_rock) * lamb_a            # [m2/g]
         SA_a = np.sum(SSA_a * psd_a * delta_d_a)           # [m2]
+        if p.n_blocks > 1:
+            # room for the second application's block, empty (d = 0) until it lands
+            d_a, delta_d_a, lamb_a, SSA_a, psd_a = (
+                np.concatenate([x, np.zeros(p.n_d_cl - len(x))])
+                for x in (d_a, delta_d_a, lamb_a, SSA_a, psd_a))
 
         p = replace(p, a=a, M_iner=M_iner)
         applied = (M_min_a, M_rock_a, rock_f_a, d_a, delta_d_a,
@@ -1476,7 +1539,10 @@ def _step_once(state, params, now, prev, dt, post_application=True,
             clip_psd = float(np.sum(state.psd[exhausted]
                                     * state.delta_d[exhausted]))   # [g]
             d = np.where(d < 0, 0.0, d)
-            delta_d = np.insert(np.diff(d), 0, d[0])               # [m]
+            if p.n_blocks == 1:
+                delta_d = np.insert(np.diff(d), 0, d[0])           # [m]
+            else:
+                delta_d = _block_widths(d, p.n_blocks)             # [m]
             [lamb, SSA, psd, SA] = smew.psd_evol(
                 d, delta_d, state.d, state.delta_d, state.psd,
                 p.n_d_cl, p.a, p.b, p.rho_rock)
@@ -1872,7 +1938,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution"):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1905,6 +1971,12 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     smew.ledger are exercised -- with sub-stepping on, no case in the suite ever
     reaches the clamp.
 
+    `reapply = (t_app_re [d], M_rock_re [g/m2])` lands a second application of the
+    same feedstock (same minerals, PSD and SSA) at t_app_re. None, the default, is the
+    single application and is bit-identical to it. With it, the PSD output arrays
+    have twice as many classes: block 1 is the first application, block 2 the second
+    (zero until it lands). See SoilParams.n_blocks for what is pooled and what is not.
+
     The `D` argument is accepted and discarded. It has never been used: the CO2
     diffusivity is recomputed below from the moisture series before D is read,
     so the value smew.respiration returns and every notebook passes in has no
@@ -1916,7 +1988,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                         M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                         gamma_on=gamma_on, gamma_picard=gamma_picard,
                         mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase,
-                        pH_method=pH_method)
+                        pH_method=pH_method, reapply=reapply)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -1981,6 +2053,11 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         keyword_add)
     state.write_into(out, 0)
 
+    # A second application: its block geometry needs `a`, refined just above.
+    if p.n_blocks > 1:
+        p = replace(p, rock_re=_fresh_block(p, reapply[1], rock_f_in, d_in, psd_perc_in))
+    reapplied = p.n_blocks == 1
+
     # The rock lands at index tt_app, which is not necessarily 0.
     if applied is not None:
         ta = p.tt_app
@@ -2022,6 +2099,14 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
             # The common case is last == i-1, where the state is already in hand.
             # Only a thaw needs it read back out of the arrays.
             st = prev_state if last == prev_idx else SoilState.from_arrays(out, last)
+
+            # Second application: added to the state this step advances from, and
+            # written back at that index so the outputs (and the ledger, which reads
+            # EW there) show it. At the first unfrozen step on or after tt_app_re.
+            if not reapplied and i >= p.tt_app_re and last == i - 1:
+                st, p = _reapply(st, p)
+                st.write_into(out, last)
+                reapplied = True
 
             post = i > p.tt_app
             rock_now = None

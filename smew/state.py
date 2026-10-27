@@ -146,6 +146,18 @@ class SoilParams:
     # every pre-P6 run; "CaCl2" likewise, but on evidence rather than by
     # default; "H2O" subtracts an offset. See _PH_TO_SOLUTION in biogeochem.py.
     pH_method: str = "solution"
+    # A second application of the same feedstock (biogeochem_balance's `reapply`).
+    # n_blocks = 1 is the historical single application and is bit-identical. With
+    # n_blocks = 2 the diameter classes are doubled: classes [0, n) carry the first
+    # application and [n, 2n) the second, each block keeping its own class widths
+    # because each starts from its own sorted diameters. The minerals stay pooled:
+    # the added mass joins M_min, exactly as every class of one application already
+    # shares the rock's mineral fractions.
+    n_blocks: int = 1
+    tt_app_re: int = -1          # timestep index of the second application; -1 = none
+    # (M_min_add [g/m2 per mineral], d, delta_d, lamb, SSA, psd of the new block,
+    #  M_iner_add [g/m2]); filled in by _initial_state once `a` is refined
+    rock_re: tuple = ()
 
 
 @dataclass(slots=True)
