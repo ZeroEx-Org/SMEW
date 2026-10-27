@@ -11,7 +11,7 @@ import numpy as np
 import smew
 from smew import activity, weathering_kinec
 from smew.state import (SoilParams, SoilState, StepForcing,
-                        STATE_1D, STATE_MIN, STATE_PSD)
+                        STATE_1D, STATE_MIN, STATE_PSD, STATE_SEC)
 from numba import njit
 from scipy.optimize import fsolve, least_squares, root
 #minimize, least_squares, newton_krylov, broyden1, root, broyden2
@@ -452,7 +452,8 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     gamma_on=False, gamma_picard=0,
                     mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
                     mg_phase="magnesite", pH_method="solution", reapply=None,
-                    ic_al_cap=None, ic_al_hold="totals"):
+                    ic_al_cap=None, ic_al_hold="totals",
+                    sec_phases=(), sec_A_seed=None):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -466,6 +467,29 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     if ic_al_hold not in ("totals", "solution", "K_Ca_Al"):
         raise ValueError("ic_al_hold must be 'totals', 'solution' or 'K_Ca_Al', "
                          f"got {ic_al_hold!r}")
+
+    # S1: secondary phases. Checked here so a typo fails before t = 0.
+    sec_phases = tuple(sec_phases)
+    if len(set(sec_phases)) != len(sec_phases):
+        raise ValueError(f"sec_phases lists a phase twice: {sec_phases}")
+    sec_A_seed = dict(sec_A_seed or {})
+    for name in sec_A_seed:
+        if name not in sec_phases:
+            raise ValueError(f"sec_A_seed names {name!r}, which is not in "
+                             f"sec_phases {sec_phases}")
+    sec_st = np.zeros([len(sec_phases), 7])
+    A_seed = np.zeros(len(sec_phases))
+    for j, name in enumerate(sec_phases):
+        ph = smew.sec_phase(name)
+        sec_st[j] = ph["st"]
+        # The limiter is closed-form for a phase that holds ONE element. Two
+        # (kaolinite: Al and Si) is S2's coupled limiter, not a silent guess.
+        if np.count_nonzero(sec_st[j]) != 1:
+            raise NotImplementedError(
+                f"{name}: the S1 limiter handles single-element phases only")
+        A_seed[j] = float(sec_A_seed.get(name, ph["A_seed"]))
+        if not A_seed[j] >= 0:
+            raise ValueError(f"sec_A_seed for {name} must be >= 0, got {A_seed[j]}")
 
     # second application (see SoilParams.n_blocks)
     n_blocks, tt_app_re = 1, -1
@@ -549,6 +573,8 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         pH_method=str(pH_method),
         ic_al_cap=ic_al_cap, ic_al_hold=str(ic_al_hold),
         n_blocks=n_blocks, tt_app_re=tt_app_re,
+        sec_phases=sec_phases, n_sec=len(sec_phases), sec_st=sec_st,
+        sec_A_seed=A_seed, dt_run=float(dt),
     )
 
 
@@ -1115,6 +1141,16 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
 
     p = replace(p, I_Ca=I_Ca, I_Mg=I_Mg, I_K=I_K, I_Na=I_Na, I_Si=I_Si, I_An=I_An)
 
+    # S1: no secondary solid at t = 0 (no initial inventory yet, plan D2), and
+    # the first step's rates from the initial solution
+    M_sec = np.zeros(p.n_sec)
+    Omega_sec = W_sec = lim_sec = np.zeros(0)
+    if p.n_sec:
+        Omega_sec, W_sec, lim_sec = _secondary(
+            p, f0.T_K, f0.s, f0.L, f0.T, gam, H, Ca, Mg, K, Na, Al,
+            Al / Al_w if Al_w > 0 else 0.0, Si, M_sec,
+            p.n * p.Zr * f0.s * 1000)
+
     state = SoilState(
         pH=pH, pH_conc=pH_conc, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
         CO2_w=CO2_w, CO2_air=CO2_air, HCO3=HCO3, CO3=CO3, DIC=DIC,
@@ -1136,6 +1172,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         d=d, delta_d=delta_d, lamb=lamb, SSA=SSA, psd=psd,
         clip_M_min=np.zeros(p.number_min),
         clip_psd=0.0,
+        M_sec=M_sec, W_sec=W_sec, Omega_sec=Omega_sec,
+        clip_sec=np.zeros(p.n_sec), lim_sec=lim_sec,
     )
     if al_cap is not None:
         p = replace(p, ic_al_removed=(Al_w_in_ic * p.n * p.Zr * f0.s * 1000
@@ -1165,6 +1203,111 @@ def _gammas_for(state, p, T_K, k_w):
         state.Al, state.AlOH, state.AlOH2, state.AlOH4,
         p.conv_mol, p.conv_Al)
     return mu, activity.gammas(mu, T_K)
+
+
+def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_sec,
+               nZrs):
+    """S1: saturation and rate of every secondary phase, from one solution.
+
+    Returns (Omega, W, lim), one entry per phase in p.sec_phases. W is the
+    DISSOLUTION rate [mol-conv/d] -- negative is precipitation, the carbonate
+    sign convention -- to be applied over the NEXT step.
+
+    THE RATE. Transition-state theory, R = s k(T, a_H) A (1 - Omega), the same
+    form in both directions. s because the model scales every mineral surface
+    by wetness (silicates, carbonates); A [m2 per m2 of ground] is growth on
+    what has formed, floored by a nucleation surface:
+        A = max(A_seed Zr, SSA MM M_sec)
+    An equilibrium phase (kin None) has no rate: the limiter alone sets W.
+
+    THE LIMITER (plan D1). An explicit rate at Omega = 1e3 overshoots past
+    saturation in one step and oscillates; F2 stops a pool going below zero,
+    and this stops a solution going below saturation, from the other side.
+    Precipitation is capped at what would bring the DISSOLVED element to the
+    phase's saturation at this state's pH, net of what the next step's
+    drainage removes anyway; dissolution at what would bring it
+    up to saturation, and at the solid present. Sized for one full run step
+    (p.dt_run), so a shorter sub-step can only take less.
+
+    Why the dissolved excess and not a re-solved equilibrium: SMEW's
+    alkalinity is the Al(OH)3-referenced one (S0.2), so removing dissolved Al
+    leaves Alk_tot alone; the exchanger then gives some Al back and the pH
+    falls, and both push Omega UP. So the closed form undershoots equilibrium
+    and never overshoots it -- the next steps finish the approach. That is
+    measured, not assumed: tests/check_secondary.py.
+
+    The price, also measured. Where the exchanger holds much Al -- acid soil --
+    it hands back most of what each step removes, so an "equilibrium" phase
+    approaches saturation over many steps, at a pace set by dt and the
+    exchanger's share of the pool, not by any rate constant. Sizing the step
+    on the whole pool instead (the exchanger scaled with Al3+) was tried and
+    is far worse: stripping exchanger Al moves base cations onto the clay, the
+    pH falls 1.3 units in one step and Omega swings to 1e-6 -- the overshoot
+    the limiter exists to prevent. Above pH ~6.5, where the clay holds almost
+    no Al (S0.3), the dissolved excess IS the whole excess and one step lands
+    on saturation.
+
+    Phases are visited in p.sec_phases order and share each element's excess:
+    whatever an earlier phase took is no longer there for a later one. With
+    Al(OH)3(a) first and gibbsite second, the amorphous ceiling is enforced at
+    once, gibbsite grows slowly below it, and the amorphous solid then
+    redissolves into the deficit gibbsite leaves -- Ostwald ripening, from
+    nothing more than the order.
+    """
+    n = p.n_sec
+    Omega, W, lim = np.zeros(n), np.zeros(n), np.zeros(n)
+    cm, ca = p.conv_mol, p.conv_Al
+    a_H = gam[activity.SP_H] * H / cm
+    # activities [mol/l] over min_st's columns. Si is H4SiO4 and uncharged; Fe
+    # has no aqueous species yet (p.Fe), the same caveat as Omega_sil.
+    g = (gam[activity.SP_CA], gam[activity.SP_MG], gam[activity.SP_K],
+         gam[activity.SP_NA], gam[activity.SP_AL], 1.0, 1.0)
+    a = np.array([g[0] * Ca / cm, g[1] * Mg / cm, g[2] * K / cm, g[3] * Na / cm,
+                  g[4] * Al / (cm * ca), Si / cm, p.Fe / cm])
+    # dissolved total per element [model units/l], and model units per mol-conv
+    w = (Ca, Mg, K, Na, Al / Al_free_frac if Al_free_frac > 0 else 0.0, Si, p.Fe)
+    unit = (1.0, 1.0, 1.0, 1.0, ca, 1.0, 1.0)
+    removed = np.zeros(7)              # taken out of solution so far [mol-conv]
+    for j, name in enumerate(p.sec_phases):
+        ph = smew.sec_phase(name)
+        st = p.sec_st[j]
+        c = int(np.flatnonzero(st)[0])                   # the one element
+        nu = st[c]
+        logK = smew.sec_log_K(name, T_K)
+        if a[c] > 0:
+            Omega[j] = 10 ** (nu * np.log10(a[c]) - ph["nu_H"] * np.log10(a_H) - logK)
+        # dissolved total at saturation: free activity from K, then back to the
+        # dissolved total through the activity coefficient and, for Al, the
+        # hydrolysis ladder's free fraction
+        a_sat = (10 ** logK * a_H ** ph["nu_H"]) ** (1 / nu)
+        free_sat = a_sat / g[c] * cm * unit[c]
+        w_sat = free_sat / Al_free_frac if c == 4 else free_sat
+        # less what the next step drains anyway: drainage takes Al, drainage
+        # and transpiration take everything else (the balances in _step_once)
+        out_l = (L if c == 4 else L + T) * 1000 * p.dt_run      # [l per m2]
+        X = ((w[c] - w_sat) * nZrs - w[c] * out_l) / unit[c] - removed[c]
+        cap_pre = max(X, 0.0) / nu / p.dt_run                # [mol-conv/d] phase
+        sat_dis = max(-X, 0.0) / nu
+        cap_dis = min(sat_dis, M_sec[j]) / p.dt_run
+        # what bound a dissolution: 1 saturation, 2 the solid running out
+        why_dis = 1.0 if sat_dis <= M_sec[j] else 2.0
+        if ph["kin"] is None:
+            W[j] = cap_dis if X < 0 else -cap_pre
+            if W[j] != 0.0:
+                lim[j] = why_dis if X < 0 else 1.0
+        else:
+            k = smew.sec_k(name, T_K, a_H) * 86400 * cm      # [mol-conv/m2/d]
+            A = max(p.sec_A_seed[j] * p.Zr, ph["SSA"] * ph["MM"] * M_sec[j] / cm)
+            R = s * k * A * (1 - Omega[j])
+            if R < -cap_pre:
+                R, lim[j] = -cap_pre, 1.0
+            elif R > cap_dis and M_sec[j] > 0:
+                R, lim[j] = cap_dis, why_dis
+            elif R > 0 and M_sec[j] == 0:
+                R = 0.0                  # nothing to dissolve: not a limit
+            W[j] = R
+        removed[c] -= W[j] * p.dt_run * nu
+    return Omega, W, lim
 
 
 def _step_once(state, params, now, prev, dt, post_application=True,
@@ -1297,6 +1440,22 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     IC_tot = (state.IC_tot + now.I * 1000 * now.DIC_rain - ADV
               + (state.W_CaCO3 + state.W_MgCO3 + prev.r_het + prev.r_aut
                  - state.Fs - prev.L * 1000 * state.DIC) * dt)
+
+    # --- S1: secondary minerals ----------------------------------------------
+    # What the phases dissolved (W > 0) or precipitated (W < 0) over this step,
+    # at the rates the previous state set -- the carbonate scheme. A separate
+    # statement, after the totals are formed, so that with no phase on not one
+    # floating-point operation above has moved (the golden masters are
+    # bit-identical). Before F2, so the positivity limiter sees it.
+    if p.n_sec:
+        sec_src = state.W_sec @ p.sec_st                       # [mol-conv/d]
+        Ca_tot = Ca_tot + sec_src[0] * dt
+        Mg_tot = Mg_tot + sec_src[1] * dt
+        K_tot = K_tot + sec_src[2] * dt
+        Na_tot = Na_tot + sec_src[3] * dt
+        Al_tot = Al_tot + sec_src[4] * p.conv_Al * dt
+        Si_tot = Si_tot + sec_src[5] * dt
+        Fe_tot = Fe_tot + sec_src[6] * dt
 
     # --- F2: positivity ------------------------------------------------------
     # Forward Euler with loss terms evaluated at the previous step has no lower
@@ -1620,6 +1779,17 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     if MgCO3 < 0.0:
         clip_MgCO3 = -MgCO3; MgCO3 = 0.0
 
+    # S1: the secondary solids, and the next step's rates from this solution
+    M_sec = state.M_sec - state.W_sec * dt                 # [mol-conv]
+    clip_sec = np.maximum(-M_sec, 0.0)
+    M_sec = np.maximum(M_sec, 0.0)
+    Omega_sec = W_sec = lim_sec = np.zeros(0)
+    if p.n_sec:
+        Omega_sec, W_sec, lim_sec = _secondary(
+            p, now.T_K, now.s, now.L, now.T, gam, H, Ca, Mg, K, Na, Al,
+            Al / Al_w if Al_w > 0 else 0.0,
+            Si, M_sec, nZrs)
+
     # Carbonate weathering
     #
     # Outside the implicit solve the natural quantity is the ACTIVITY, so these
@@ -1761,6 +1931,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         clip_CaCO3=clip_CaCO3, clip_MgCO3=clip_MgCO3, clip_M_min=clip_M_min,
         clip_psd=clip_psd,
         dt_max=dt_max, n_substeps=1.0,
+        M_sec=M_sec, W_sec=W_sec, Omega_sec=Omega_sec, clip_sec=clip_sec,
+        lim_sec=lim_sec,
     )
     # Is that clipping meaningful, or is it roundoff on an empty pool?
     #
@@ -2122,7 +2294,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals"):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals", sec_phases=(), sec_A_seed=None):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -2161,6 +2333,14 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
     have twice as many classes: block 1 is the first application, block 2 the second
     (zero until it lands). See SoilParams.n_blocks for what is pooled and what is not.
 
+    `sec_phases` (S1) lists the secondary minerals allowed to form in the soil, by
+    constants._SEC_PHASES name: "Al(OH)3(a)", "gibbsite", "SiO2(a)". () is the
+    default and is bit-identical. Order matters -- phases sharing an element share
+    its excess in this order, so put the more soluble first, e.g.
+    ("Al(OH)3(a)", "gibbsite", "SiO2(a)"). `sec_A_seed = {name: m2 per m3 of soil}`
+    overrides a phase's nucleation surface, the parameter the data cannot pin down
+    and the one to sweep. See _secondary for the rate law and the limiter.
+
     The `D` argument is accepted and discarded. It has never been used: the CO2
     diffusivity is recomputed below from the moisture series before D is read,
     so the value smew.respiration returns and every notebook passes in has no
@@ -2173,7 +2353,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                         gamma_on=gamma_on, gamma_picard=gamma_picard,
                         mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase,
                         pH_method=pH_method, reapply=reapply,
-                        ic_al_cap=ic_al_cap, ic_al_hold=ic_al_hold)
+                        ic_al_cap=ic_al_cap, ic_al_hold=ic_al_hold,
+                        sec_phases=sec_phases, sec_A_seed=sec_A_seed)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -2214,6 +2395,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         out[k] = np.zeros([p.number_min, nt])
     for k in STATE_PSD:
         out[k] = np.zeros([p.n_d_cl, nt])
+    for k in STATE_SEC:
+        out[k] = np.zeros([p.n_sec, nt])
     for k in ("UP_Ca", "UP_Mg", "UP_K", "UP_Si"):
         out[k] = np.zeros(nt)
     errors = np.zeros([16, nt])
@@ -2375,6 +2558,15 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         # the K_Ca_Al the run used (thermodynamic when gamma_on); differs from
         # the input only under ic_al_hold="K_Ca_Al"
         "K_Ca_Al_used": p.K_Ca_Al,
+        # --- S1: secondary minerals, (n_sec, nt); empty when sec_phases=() ---
+        # Outside the output contract for now, as Al_ic_removed is: the golden
+        # masters compare the contract, and a phase-off run must stay
+        # bit-identical in it. W_sec < 0 is precipitation, applied over the
+        # step AFTER the index it is stored at (the W_CaCO3 convention).
+        "sec_phases": p.sec_phases, "sec_st": p.sec_st,
+        "M_sec": out["M_sec"], "W_sec": out["W_sec"],
+        "Omega_sec": out["Omega_sec"], "clip_sec": out["clip_sec"],
+        "lim_sec": out["lim_sec"],
         # --- F4 activities ---
         # mu is ionic strength [mol/l]; gamma_H is the H+ activity coefficient,
         # which is exactly the activity-vs-concentration pH offset. Every other

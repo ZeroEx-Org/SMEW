@@ -229,6 +229,21 @@ def build(data, water=None, oc=None):
             return np.zeros(len(i))
         return np.asarray(data[key], dtype=float)[i]
 
+    # S1: secondary minerals. W_sec[m, k] is phase m DISSOLVING at index k
+    # [mol-conv/d], negative when it precipitates, and -- like W_CaCO3 -- it
+    # acts over the step that starts at k. sec_st is its formula over min_st's
+    # columns. Results from before S1, or with no phase on, carry none of it,
+    # and then no row is added at all, so their reports read exactly as before.
+    sec_names = tuple(d.get("sec_phases", ()))
+    sec_st = np.asarray(d.get("sec_st", np.zeros((0, 7))), dtype=float)
+    W_sec = np.asarray(d.get("W_sec", np.zeros((0, len(d["temp_soil"])))), dtype=float)
+
+    def with_sec(sources, el_name, unit=1.0):
+        """Add the secondary-mineral source row to one element's sources."""
+        if sec_names:
+            sources["secondary"] = (sec_st[:, MIN_ST_COL[el_name]] @ W_sec[:, j]) * dt * unit
+        return sources
+
     # water carried out of the layer, per step, in litres per m2
     drain = L[j] * 1000 * dt                 # below the root zone
     transp = T[j] * 1000 * dt                # pulled through the plant
@@ -244,10 +259,10 @@ def build(data, water=None, oc=None):
     # the carbon pool. Only the carbon that came OUT OF THE MINERAL is new.
     el["Ca"] = _pool(
         d["Ca_tot"], i, j,
-        sources={"background": d["I_Ca"] * dt * np.ones(len(i)),
+        sources=with_sec({"background": d["I_Ca"] * dt * np.ones(len(i)),
                  "mineral": mineral("Ca"),
                  "carbonate": d["W_CaCO3"][j] * dt,
-                 "clipping_retained": clipped("Ca")},
+                 "clipping_retained": clipped("Ca")}, "Ca"),
         sinks={"drainage": drain * d["Ca"][j],
                "transpiration": transp * d["Ca"][j],
                "uptake_active": up[:, 0] * dt})
@@ -255,10 +270,10 @@ def build(data, water=None, oc=None):
     # --- magnesium ----------------------------------------------------------
     el["Mg"] = _pool(
         d["Mg_tot"], i, j,
-        sources={"background": d["I_Mg"] * dt * np.ones(len(i)),
+        sources=with_sec({"background": d["I_Mg"] * dt * np.ones(len(i)),
                  "mineral": mineral("Mg"),
                  "carbonate": d["W_MgCO3"][j] * dt,
-                 "clipping_retained": clipped("Mg")},
+                 "clipping_retained": clipped("Mg")}, "Mg"),
         sinks={"drainage": drain * d["Mg"][j],
                "transpiration": transp * d["Mg"][j],
                "uptake_active": up[:, 1] * dt})
@@ -266,9 +281,9 @@ def build(data, water=None, oc=None):
     # --- potassium ----------------------------------------------------------
     el["K"] = _pool(
         d["K_tot"], i, j,
-        sources={"background": d["I_K"] * dt * np.ones(len(i)),
+        sources=with_sec({"background": d["I_K"] * dt * np.ones(len(i)),
                  "mineral": mineral("K"),
-                 "clipping_retained": clipped("K")},
+                 "clipping_retained": clipped("K")}, "K"),
         sinks={"drainage": drain * d["K"][j],
                "transpiration": transp * d["K"][j],
                "uptake_active": up[:, 2] * dt})
@@ -277,9 +292,9 @@ def build(data, water=None, oc=None):
     # no uptake row of either kind: plants do not require sodium
     el["Na"] = _pool(
         d["Na_tot"], i, j,
-        sources={"background": d["I_Na"] * dt * np.ones(len(i)),
+        sources=with_sec({"background": d["I_Na"] * dt * np.ones(len(i)),
                  "mineral": mineral("Na"),
-                 "clipping_retained": clipped("Na")},
+                 "clipping_retained": clipped("Na")}, "Na"),
         sinks={"drainage": drain * d["Na"][j],
                "transpiration": transp * d["Na"][j]})
 
@@ -291,8 +306,8 @@ def build(data, water=None, oc=None):
     # cation -- quantified in diagnostics, not judged here.
     el["Al"] = _pool(
         d["Al_tot"], i, j,
-        sources={"mineral": mineral("Al") * d["conv_Al"],
-                 "clipping_retained": clipped("Al")},
+        sources=with_sec({"mineral": mineral("Al") * d["conv_Al"],
+                          "clipping_retained": clipped("Al")}, "Al", d["conv_Al"]),
         sinks={"drainage": drain * d["Al_w"][j]})
 
     # --- iron ---------------------------------------------------------------
@@ -302,16 +317,16 @@ def build(data, water=None, oc=None):
     # was to make the rock-to-solution balance closeable, so it has to close.
     el["Fe"] = _pool(
         d["Fe_tot"], i, j,
-        sources={"mineral": mineral("Fe"),
-                 "clipping_retained": clipped("Fe")},
+        sources=with_sec({"mineral": mineral("Fe"),
+                 "clipping_retained": clipped("Fe")}, "Fe"),
         sinks={"drainage": drain * d["Fe"][j]})
 
     # --- silicon ------------------------------------------------------------
     el["Si"] = _pool(
         d["Si_tot"], i, j,
-        sources={"background": d["I_Si"] * dt * np.ones(len(i)),
+        sources=with_sec({"background": d["I_Si"] * dt * np.ones(len(i)),
                  "mineral": mineral("Si"),
-                 "clipping_retained": clipped("Si")},
+                 "clipping_retained": clipped("Si")}, "Si"),
         sinks={"drainage": drain * d["Si"][j],
                "transpiration": transp * d["Si"][j],
                "uptake_active": up[:, 3] * dt})
@@ -355,6 +370,17 @@ def build(data, water=None, oc=None):
         sinks={"efflux": d["Fs"][j] * dt,
                "drainage": drain * d["DIC"][j],
                "gas_displacement": d["ADV"][i]})
+
+    # --- S1: the secondary solids, one pool each ----------------------------
+    # The other side of every "secondary" row above: what a phase precipitates
+    # leaves the solution and arrives here. Moles of formula units, so this is
+    # a balance of the phase itself, not of an element.
+    for m, name in enumerate(sec_names):
+        clip = np.asarray(d["clip_sec"], dtype=float)[m, i]
+        el["sec:" + name] = _pool(
+            np.asarray(d["M_sec"], dtype=float)[m], i, j,
+            sources={"clipping_retained": clip},
+            sinks={"dissolution": W_sec[m, j] * dt})
 
     led = {"steps": steps, "lasts": lasts, "elements": el,
            "n_steps": len(d["temp_soil"]), "dt": dt,
@@ -785,7 +811,8 @@ def closure(led):
     which is why both are checked. `resolution` records that ratio per element.
     """
     scales, per = {}, {}
-    for name in ELEMENTS:
+    names = ELEMENTS + tuple(k for k in led["elements"] if k.startswith("sec:"))
+    for name in names:
         p = led["elements"][name]
         src = sum(p["sources"].values()) if p["sources"] else np.zeros(len(led["steps"]))
         snk = sum(p["sinks"].values()) if p["sinks"] else np.zeros(len(led["steps"]))
@@ -796,7 +823,7 @@ def closure(led):
     run_scale = max(scales.values()) if scales else 0.0
 
     rows = []
-    for name in ELEMENTS:
+    for name in names:
         p = led["elements"][name]
         src, snk, step_res = per[name]
         tot_src, tot_snk = float(np.sum(src)), float(np.sum(snk))

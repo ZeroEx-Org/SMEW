@@ -520,6 +520,95 @@ def log_K_AlOH3(phase, T_K):
     return logK25 - dH / (R * np.log(10)) * (1 / T_K - 1 / 298.15)
 
 #------------------------------------------------------------------------------
+ # Secondary minerals [S1: phreeqc.dat; Palandri and Kharaka 2004]
+
+# One table for every phase that can FORM in the soil (plan D5), instead of one
+# `if mineral == ...` branch per phase. Each row:
+#
+#   st        what one mole releases on dissolving, over the seven columns of
+#             min_st: [Ca, Mg, K, Na, Al, Si, Fe]
+#   nu_H      H+ consumed per mole dissolved, as the phreeqc.dat reaction is
+#             written. K = prod(a_i^st_i) / a_H^nu_H
+#   log_K     phreeqc.dat. Either ("vh", logK25, dH [kcal/mol]) -- van 't Hoff,
+#             what PHREEQC does when the database gives no analytic -- or
+#             ("an", A1, A2, A3): log K = A1 + A2*T + A3/T, phreeqc.dat's own
+#             analytic expression, which PHREEQC prefers when present
+#   kin       None: an EQUILIBRIUM phase. It relaxes to saturation in one step,
+#             limited only by the solid present on the way down. Otherwise
+#             Palandri and Kharaka (2004) mechanisms, each (log k25 [mol/m2/s],
+#             E [kJ/mol], n) with k = k25 exp(-E/R (1/T - 1/298.15)) a_H^n:
+#             "acid", "neutral" (n = 0), "base"
+#   MM        molar mass [g/mol]
+#   SSA       specific surface of the precipitate [m2/g] -- growth on what has
+#             formed. ASSUMED, not measured; see A_seed
+#   A_seed    surface available before any of the phase exists [m2 per m3 of
+#             soil]: the nucleation floor. THE tuning knob (plan D2), defaulted,
+#             to be swept rather than believed
+#
+# Al(OH)3(am) has no defensible rate constant -- it is the phase that forms first
+# and fastest -- so it is an equilibrium phase. That is a modelling judgement,
+# and the MOMBAK porewater (S0.5, at -1.1 SI) is the evidence for the ceiling,
+# not for a rate.
+#
+# Gibbsite and amorphous silica use P&K's dissolution parameters in the TST
+# form R = k A (1 - Omega) for BOTH directions, i.e. precipitation as the
+# reverse of dissolution (detailed balance). For gibbsite near equilibrium that
+# is the linear limit of Nagy and Lasaga (1992); far from it, precipitation is
+# nonlinear in Omega and this understates nothing the limiter does not cap.
+_SEC_PHASES = {
+    "Al(OH)3(a)": dict(
+        st=(0, 0, 0, 0, 1, 0, 0), nu_H=3,
+        log_K=("vh", 10.8, -26.5),                        # phreeqc.dat
+        kin=None, MM=78.004, SSA=0.0, A_seed=0.0),
+    "gibbsite": dict(
+        st=(0, 0, 0, 0, 1, 0, 0), nu_H=3,
+        log_K=("vh", 8.11, -22.8),                        # phreeqc.dat
+        # P&K 2004 table (Oxides), from Nagy and Lasaga (1992) and Packter
+        kin={"acid": (-7.65, 47.5, 0.992), "neutral": (-11.50, 61.2, 0.0),
+             "base": (-16.65, 80.1, -0.784)},
+        MM=78.004, SSA=10.0, A_seed=1.0e3),
+    "SiO2(a)": dict(
+        st=(0, 0, 0, 0, 0, 1, 0), nu_H=0,
+        log_K=("an", -0.26, 0.0, -731.0),                 # phreeqc.dat
+        # P&K 2004 Table 6, amorphous silica, from Icenhower and Dove (2000)
+        kin={"neutral": (-12.23, 74.5, 0.0)},
+        MM=60.084, SSA=100.0, A_seed=1.0e3),
+}
+
+
+def sec_phase(name):
+    """The _SEC_PHASES row for `name`, or a ValueError naming the choices."""
+    if name not in _SEC_PHASES:
+        raise ValueError(f"Unknown secondary phase {name!r}; "
+                         f"choose from {sorted(_SEC_PHASES)}")
+    return _SEC_PHASES[name]
+
+
+def sec_log_K(name, T_K):
+    """log10 K of a secondary phase's dissolution reaction, in activities."""
+    lk = sec_phase(name)["log_K"]
+    if lk[0] == "an":
+        return lk[1] + lk[2] * T_K + lk[3] / T_K
+    R = 1.987204e-3                                       # [kcal/mol/K]
+    return lk[1] - lk[2] / (R * np.log(10)) * (1 / T_K - 1 / 298.15)
+
+
+def sec_k(name, T_K, a_H):
+    """Rate constant [mol/m2/s] at T_K and H+ activity a_H [mol/l].
+
+    inf for an equilibrium phase. Each mechanism is Arrhenius from 25 C, as
+    Palandri and Kharaka write it (their eqns 5-6), and they add.
+    """
+    kin = sec_phase(name)["kin"]
+    if kin is None:
+        return np.inf
+    R = 8.314462618e-3                                    # [kJ/mol/K]
+    k = 0.0
+    for logk25, E, n_H in kin.values():
+        k += 10 ** logk25 * np.exp(-E / R * (1 / T_K - 1 / 298.15)) * a_H ** n_H
+    return k
+
+#------------------------------------------------------------------------------
  # carbonate speciation [Stumm and Morgan, 1996]
 
 def K_C(T_K,conv_mol):

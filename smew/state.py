@@ -169,6 +169,17 @@ class SoilParams:
     # (M_min_add [g/m2 per mineral], d, delta_d, lamb, SSA, psd of the new block,
     #  M_iner_add [g/m2]); filled in by _initial_state once `a` is refined
     rock_re: tuple = ()
+    # --- S1: secondary minerals -----------------------------------------------
+    # The phases allowed to form in the soil, by constants._SEC_PHASES name, in
+    # the order the limiter visits them (see biogeochem._secondary). () is the
+    # model before S1 and is bit-identical: nothing below is touched.
+    sec_phases: tuple = ()
+    n_sec: int = 0
+    sec_st: np.ndarray = None    # (n_sec, 7) stoichiometry, as min_st
+    sec_A_seed: np.ndarray = None  # nucleation surface [m2 per m3 of soil]
+    # the run's timestep [d]. The limiter sizes each step's precipitation for an
+    # interval of THIS length; sub-steps are shorter, so they can only take less.
+    dt_run: float = 0.0
 
 
 @dataclass(slots=True)
@@ -231,6 +242,8 @@ STATE_1D = (
 STATE_MIN = ("EW", "Wr", "Omega", "M_min", "rock_f",
              "clip_M_min")                                # (n_mineral, n_steps)
 STATE_PSD = ("d", "delta_d", "lamb", "SSA", "psd")        # (n_class,   n_steps)
+# S1: per secondary phase. (0, n_steps) when no phase is on.
+STATE_SEC = ("M_sec", "W_sec", "Omega_sec", "clip_sec", "lim_sec")
 
 
 @dataclass(slots=True)
@@ -311,6 +324,26 @@ class SoilState:
     dt_max: float = float("inf")
     n_substeps: float = 1.0
 
+    # -- S1: secondary minerals, one entry per phase in SoilParams.sec_phases --
+    # M_sec      the solid formed so far [mol-conv per m2]
+    # W_sec      its dissolution rate [mol-conv/d]; NEGATIVE is precipitation.
+    #            The carbonate convention (W_CaCO3): computed from this state's
+    #            solution and applied over the NEXT step, which is where the
+    #            ledger reads it.
+    # Omega_sec  saturation ratio of this state's solution [-], in activities
+    # clip_sec   solid the explicit update could not remove [mol-conv]: F2's
+    #            record, for a pool the limiter already keeps non-negative, so
+    #            float noise at most
+    # lim_sec    0 where the rate law set W_sec (or nothing happened); 1 where
+    #            the saturation limiter did; 2 where the solid ran out. How
+    #            often 1 binds is the diagnostic for whether the rate
+    #            constants matter at all
+    M_sec: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    W_sec: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    Omega_sec: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    clip_sec: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    lim_sec: np.ndarray = field(default_factory=lambda: np.zeros(0))
+
     # -- array <-> state ---------------------------------------------------
     # These loop over the STATE_* name tuples with getattr rather than assigning
     # 56 fields by hand, so that adding a field cannot leave the writer and the
@@ -326,7 +359,7 @@ class SoilState:
         """
         for k in STATE_1D:
             out[k][i] = getattr(self, k)
-        for k in STATE_MIN + STATE_PSD:
+        for k in STATE_MIN + STATE_PSD + STATE_SEC:
             out[k][:, i] = getattr(self, k)
 
     @classmethod
@@ -338,7 +371,7 @@ class SoilState:
         out of the output arrays.
         """
         kw = {k: out[k][i] for k in STATE_1D}
-        kw.update({k: out[k][:, i].copy() for k in STATE_MIN + STATE_PSD})
+        kw.update({k: out[k][:, i].copy() for k in STATE_MIN + STATE_PSD + STATE_SEC})
         return cls(**kw)
 
     def copy(self):

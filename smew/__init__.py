@@ -16,6 +16,9 @@ from smew.constants import (
     K_GT_CEC,
     K_Al,
     log_K_AlOH3,
+    sec_phase,
+    sec_log_K,
+    sec_k,
     K_C,
     MM
 )

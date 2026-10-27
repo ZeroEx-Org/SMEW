@@ -20,3 +20,5 @@ probe_s0.py
 probe_s0_analysis.py
 probe_s1_0.py
 probe_s1_0_tepas.py
+check_secondary.py
+probe_s1.py
