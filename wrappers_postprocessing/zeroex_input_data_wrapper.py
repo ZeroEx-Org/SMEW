@@ -548,7 +548,10 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
     M_rock_re = float(getattr(data_in, 'M_rock_re', 0) or 0)
     reapply = (float(data_in.t_app_re), M_rock_re) if M_rock_re > 0 else None
 
-    [conc_in, K_CEC] = smew.f_CEC_to_conc(f_CEC_in, pH_ic, data_in.soil, conv_mol, conv_Al)
+    # T_K: the starting solution is built with the Al ladder the model steps with,
+    # at the temperature it starts at (see the note at the top of smew/ic.py)
+    [conc_in, K_CEC] = smew.f_CEC_to_conc(f_CEC_in, pH_ic, data_in.soil, conv_mol, conv_Al,
+                                          T_K=temp_soil[0] + 273.15)
 
     # ic_al_cap / ic_al_hold (optional Soil-sheet rows, S1.0): cap the initial dissolved Al at
     # the phase's solubility. Sheets give f_CEC and derive the water from it, so the default

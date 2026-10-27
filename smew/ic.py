@@ -8,15 +8,32 @@ import numpy as np
 import smew
 from scipy.optimize import fsolve
 
+# THE TEMPERATURE OF THE INITIAL CONDITION (T_K, every helper below).
+#
+# Each helper converts between exchange fractions and dissolved aluminium through
+# the hydrolysis ladder. Without T_K that is smew.K_Al's fixed set (Weil & Brady,
+# pK 5, 5.1, 6.7, 6.2), while biogeochem_balance steps with the temperature-
+# dependent phreeqc.dat set (Nordstrom et al. 1990, doi:10.1021/bk-1990-0416.ch031,
+# as tabulated in WATEQ4F, Ball & Nordstrom 1991, doi:10.3133/ofr91183) since P5b.
+# The two disagree by 0.13 (K3) and 0.48 (K4) log units even AT 25 C, and by up to
+# ~2 log units on the cumulative constants at soil temperatures. So an initial
+# state built here was not in equilibrium with the model's own first step:
+# dissolved Al moved by 70 % in step 1 of the synthetic case with nothing else
+# happening, and S1's limiter acted on that artifact as if it were chemistry.
+#
+# Pass T_K = temp_soil[0] + 273.15 -- the temperature biogeochem_balance starts
+# at -- and the ladder is the model's. None keeps the fixed set, bit-identical to
+# every result produced before.
+
 #------------------------------------------------------------------------------
  # conc to CEC fractions
     
-def conc_to_f_CEC(conc_in,pH_in,soil,conv_mol,conv_Al):
+def conc_to_f_CEC(conc_in,pH_in,soil,conv_mol,conv_Al, T_K=None):
             
     #constants 
     K_CEC = smew.K_GT_CEC(soil,conv_mol) #CEC Gaines-Thomas
     [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H] = K_CEC
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol) #Al speciation
+    [K1, K2, K3, K4] = smew.K_Al(conv_mol, T_K) #Al speciation
     
     # cations (mol-conv/l)
     [Ca, Mg, K, Na, Al_w] = conc_in
@@ -45,7 +62,7 @@ def conc_to_f_CEC(conc_in,pH_in,soil,conv_mol,conv_Al):
 #------------------------------------------------------------------------------
  # CEC fractions to conc 
     
-def f_CEC_to_conc(f_CEC_in, pH_in, soil, conv_mol,conv_Al):
+def f_CEC_to_conc(f_CEC_in, pH_in, soil, conv_mol,conv_Al, T_K=None):
             
     #pH
     H = 10**(-pH_in)*conv_mol 
@@ -53,7 +70,7 @@ def f_CEC_to_conc(f_CEC_in, pH_in, soil, conv_mol,conv_Al):
     #constants 
     K_CEC = smew.K_GT_CEC(soil,conv_mol) #CEC Gaines-Thomas
     [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H] = K_CEC
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol) #Al speciation
+    [K1, K2, K3, K4] = smew.K_Al(conv_mol, T_K) #Al speciation
 
     #f_CEC [-]
     [f_Ca, f_Mg, f_K, f_Na, f_Al, f_H] = f_CEC_in
@@ -75,12 +92,12 @@ def f_CEC_to_conc(f_CEC_in, pH_in, soil, conv_mol,conv_Al):
 #------------------------------------------------------------------------------
  # Input: Total (Ca, Mg, K, Na) and CEC base saturation (or acid saturation, f_H+f_Al)
     
-def total_to_f_CEC_and_conc(total_in, pH_in, f_acid, s, soil, n,Zr,CEC_tot,conv_mol,conv_Al):
+def total_to_f_CEC_and_conc(total_in, pH_in, f_acid, s, soil, n,Zr,CEC_tot,conv_mol,conv_Al, T_K=None):
 
     #constants 
     K_CEC = smew.K_GT_CEC(soil, conv_mol) #CEC Gaines-Thomas
     [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H] = K_CEC
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol) #Al speciation
+    [K1, K2, K3, K4] = smew.K_Al(conv_mol, T_K) #Al speciation
 
     # total (mol-conv/m2)
     [Ca_tot, Mg_tot, K_tot, Na_tot] = total_in
@@ -135,7 +152,7 @@ def total_to_f_CEC_and_conc(total_in, pH_in, f_acid, s, soil, n,Zr,CEC_tot,conv_
 #------------------------------------------------------------------------------
  # Calibration of K constants on coupled f_CEC and conc measurements
     
-def f_CEC_and_conc_to_K(f_CEC_in, conc_in, pH_in, soil, conv_mol,conv_Al):
+def f_CEC_and_conc_to_K(f_CEC_in, conc_in, pH_in, soil, conv_mol,conv_Al, T_K=None):
             
     #pH
     H = 10**(-pH_in)*conv_mol 
@@ -147,7 +164,7 @@ def f_CEC_and_conc_to_K(f_CEC_in, conc_in, pH_in, soil, conv_mol,conv_Al):
     [Ca, Mg, K, Na, Al_w] = conc_in
     
     # Al spec
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol)
+    [K1, K2, K3, K4] = smew.K_Al(conv_mol, T_K)
     Al=(H**4/(H**4+H**3*K1+H**2*K1*K2+H*K1*K2*K3+K1*K2*K3*K4))*Al_w
     
     #estimates of K constants
@@ -169,12 +186,12 @@ def f_CEC_and_conc_to_K(f_CEC_in, conc_in, pH_in, soil, conv_mol,conv_Al):
 #------------------------------------------------------------------------------
  # Input: Total (Ca, Mg, K, Na) and Al_w
     
-def Kelland(total_in, pH_in, conc_in, s, soil, n,Zr,CEC_tot,conv_mol,conv_Al):
+def Kelland(total_in, pH_in, conc_in, s, soil, n,Zr,CEC_tot,conv_mol,conv_Al, T_K=None):
 
     #constants 
     K_CEC = smew.K_GT_CEC(soil, conv_mol) #CEC Gaines-Thomas
     [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H] = K_CEC
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol) #Al speciation
+    [K1, K2, K3, K4] = smew.K_Al(conv_mol, T_K) #Al speciation
 
     # known (mol-conv/m2)
     [Ca_tot, Mg_tot, K_tot, Na_tot] = total_in
@@ -223,7 +240,7 @@ def Kelland(total_in, pH_in, conc_in, s, soil, n,Zr,CEC_tot,conv_mol,conv_Al):
 #------------------------------------------------------------------------------
  # Amann et al., fractions and Mg conc 
     
-def Amann(f_CEC_in, pH_in, Mg_in, soil, conv_mol,conv_Al):
+def Amann(f_CEC_in, pH_in, Mg_in, soil, conv_mol,conv_Al, T_K=None):
             
     #pH
     H = 10**(-pH_in)*conv_mol 
@@ -231,7 +248,7 @@ def Amann(f_CEC_in, pH_in, Mg_in, soil, conv_mol,conv_Al):
     #constants 
     K_CEC = smew.K_GT_CEC(soil,conv_mol) #CEC Gaines-Thomas
     [K_Ca_Mg, K_Ca_K, K_Ca_Na, K_Ca_Al, K_Ca_H] = K_CEC
-    [K1, K2, K3, K4] = smew.K_Al(conv_mol) #Al speciation
+    [K1, K2, K3, K4] = smew.K_Al(conv_mol, T_K) #Al speciation
 
     #f_CEC [-]
     [f_Ca, f_Mg, f_K, f_Na, f_Al, f_H] = f_CEC_in

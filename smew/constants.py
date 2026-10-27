@@ -442,10 +442,18 @@ def K_GT_CEC(soil, conv_mol):
 
 #------------------------------------------------------------------------------
  # Aluminium speciation (pag. 398 Weil and Brady)
+ # Weil, R. R. & Brady, N. C. (2016), The Nature and Properties of Soils, 15th ed.,
+ # Pearson -- as cited by Bertagni et al. 2025 (JAMES), appendix "Aluminum
+ # Speciation". A textbook, no DOI. Now only the legacy default of K_Al (T_K=None).
 
 # Aluminium hydrolysis, CUMULATIVE reactions Al+3 + n H2O = Al(OH)n + n H+,
 # as the analytic coefficients A1 + A2*T + A3/T + A4*log10(T). Taken verbatim
-# from phreeqc.dat, which carries the Nordstrom & May compilation.
+# from phreeqc.dat. Their source, checked line by line: WATEQ4F's Table 2,
+# species 80-82 and 336 (Ball & Nordstrom 1991, USGS OFR 91-183,
+# doi:10.3133/ofr91183), which cites them to Nordstrom et al. (1990), ACS Symp.
+# Ser. 416, 398-413, doi:10.1021/bk-1990-0416.ch031. Nordstrom & May (1989/1996,
+# The Environmental Chemistry of Aluminum, doi:10.1201/9780138736781-2) is the
+# aluminium review behind that revision, not the table these numbers come from.
 _AL_ANALYTIC = (
     (-38.253,  0.0,   -656.27,  14.327),   # AlOH+2
     ( 88.500,  0.0,  -9391.60, -27.121),   # Al(OH)2+
@@ -497,7 +505,8 @@ def K_Al(conv_mol, T_K=None):
  # Aluminium hydroxide solubility [phreeqc.dat]
 
 # Al(OH)3 + 3H+ = Al+3 + 3H2O: log K at 25 C and delta_h [kcal/mol], as
-# phreeqc.dat carries them (Nordstrom et al. 1990, the same source as the
+# phreeqc.dat carries them -- WATEQ4F Table 2 entries 51 (gibbsite, 8.11 +/- 0.2)
+# and 140 (amorphous), both cited there to Nordstrom et al. 1990, the same source as the
 # hydrolysis ladder above). The amorphous phase is what precipitates first and is
 # ~10^2.7 more soluble; gibbsite is the stable, slow end.
 _AL_OH3_PHASES = {
@@ -558,19 +567,24 @@ def log_K_AlOH3(phase, T_K):
 _SEC_PHASES = {
     "Al(OH)3(a)": dict(
         st=(0, 0, 0, 0, 1, 0, 0), nu_H=3,
-        log_K=("vh", 10.8, -26.5),                        # phreeqc.dat
+        log_K=("vh", 10.8, -26.5),       # phreeqc.dat; WATEQ4F #140, Nordstrom+ 1990
         kin=None, MM=78.004, SSA=0.0, A_seed=0.0),
     "gibbsite": dict(
         st=(0, 0, 0, 0, 1, 0, 0), nu_H=3,
-        log_K=("vh", 8.11, -22.8),                        # phreeqc.dat
-        # P&K 2004 table (Oxides), from Nagy and Lasaga (1992) and Packter
+        log_K=("vh", 8.11, -22.8),       # phreeqc.dat; WATEQ4F #51, Nordstrom+ 1990
+        # P&K 2004 (doi:10.3133/ofr20041068), oxides table, selected there
+        # from Nagy and Lasaga 1992 (doi:10.1016/0016-7037(92)90291-P) and Packter
+        # and Dhillon 1974, Colloid Polym. Sci. 252, 249-256 (doi:10.1007/BF01638106)
         kin={"acid": (-7.65, 47.5, 0.992), "neutral": (-11.50, 61.2, 0.0),
              "base": (-16.65, 80.1, -0.784)},
         MM=78.004, SSA=10.0, A_seed=1.0e3),
     "SiO2(a)": dict(
         st=(0, 0, 0, 0, 0, 1, 0), nu_H=0,
-        log_K=("an", -0.26, 0.0, -731.0),                 # phreeqc.dat
-        # P&K 2004 Table 6, amorphous silica, from Icenhower and Dove (2000)
+        log_K=("an", -0.26, 0.0, -731.0),  # phreeqc.dat; WATEQ4F #395 (-2.71 at 25 C)
+        # P&K 2004 Table 6, amorphous silica, from Icenhower and Dove 2000
+        # (doi:10.1016/S0016-7037(00)00487-7). Consistent with Rimstidt and
+        # Barnes 1980 (doi:10.1016/0016-7037(80)90220-3): their precipitation
+        # constant is this one divided by K
         kin={"neutral": (-12.23, 74.5, 0.0)},
         MM=60.084, SSA=100.0, A_seed=1.0e3),
 }
