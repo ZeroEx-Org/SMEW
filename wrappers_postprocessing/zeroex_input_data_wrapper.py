@@ -4,6 +4,7 @@ import os
 import time; start_time = time.time()
 import importlib as imp
 import smew
+from smew.biogeochem import _PH_TO_SOLUTION
 #import figEW
 
 import matplotlib.pyplot as plt
@@ -278,8 +279,13 @@ def _plot_omega(ax, model_results):
 
 
 def _plot_rock_mass(ax, model_results):
-    ax.plot(model_results['t'], model_results['M_rock'][:] / model_results['M_rock'][0] * 100,
-             color=PALETTE[0], linewidth=LW_MAIN)
+    # Normalise by the first nonzero mass: with interpolate_frozen=False, or an application
+    # after the first step (t_app > dt), M_rock[0] is 0 and the curve would be all NaN.
+    M = np.asarray(model_results['M_rock'], dtype=float)
+    applied = M > 0
+    if applied.any():
+        ax.plot(model_results['t'][applied], M[applied] / M[applied][0] * 100,
+                 color=PALETTE[0], linewidth=LW_MAIN)
     ax.set_ylabel('Rock mass (%)')
     ax.set_xlabel(XLABEL)
     _style_axis(ax)
@@ -400,7 +406,7 @@ def read_input_data(project_name, value_col):
     return input_data
 
 def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
-             freeze_on=False):
+             freeze_on=False, rain=None):
     """Run the full SMEW pipeline for a project data sheet.
 
     interpolate_frozen : rewrite the 13 series listed below across frozen steps.
@@ -415,6 +421,9 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
         is held. False is the historical behaviour and stays the default.
         Vulkaneifel is the only benchmark case that ever freezes, and it is
         frozen 30.6 % of its steps, 43.3 % of all its drainage.
+    rain : rainfall [m per step] on the run's grid, np.arange(0, t_end, dt), e.g.
+        observed station data. None keeps the stochastic series from the Rain sheet
+        (rain_stoc_season), and seed is then the only thing that sets it.
     """
     print('--------------------------------------------------------------------------------------')
     print('Running SMEW for',project_name,'...')
@@ -463,7 +472,10 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
     #stochastic rain with seasonality [m] (only works with multi-year)
     alfa_rain = data_in.alfa_rain*10**(-3) # Convert from mm to m
     # day1 must be passed so the monthly lambda/alfa align with the start month
-    rain = smew.rain_stoc_season(data_in.lambda_rain, alfa_rain, t_end, dt, data_in.day1, seed=seed)
+    if rain is None:
+        rain = smew.rain_stoc_season(data_in.lambda_rain, alfa_rain, t_end, dt, data_in.day1, seed=seed)
+    elif len(rain) != len(t):
+        raise ValueError(f"rain has {len(rain)} steps, the run has {len(t)}")
 
     #vegetation [g/m2]
     v_in = 0
@@ -523,7 +535,20 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
     if abs(sum(f_CEC_in)-1) > 1e-3:
         raise ValueError("Sum of fractions must be 1")
 
-    [conc_in, K_CEC] = smew.f_CEC_to_conc(f_CEC_in, data_in.pH_in, data_in.soil, conv_mol, conv_Al)
+    # pH_method (optional Soil-sheet row): the solution pH_in was measured in. biogeochem_balance
+    # converts it to the soil-solution pH itself (P6); the starting solution is built here,
+    # so it must get the same converted pH. Sheets without the row keep "solution" (no offset).
+    pH_method = getattr(data_in, 'pH_method', 'solution')
+    if not isinstance(pH_method, str):  # an empty cell reads as NaN
+        pH_method = 'solution'
+    pH_ic = data_in.pH_in - _PH_TO_SOLUTION[pH_method]
+
+    # Optional second application of the same feedstock: M_rock_re [g/m2] at t_app_re [d]
+    # (input_data keys, e.g. set by wrapper v2 scenarios). Absent or 0 -> single application.
+    M_rock_re = float(getattr(data_in, 'M_rock_re', 0) or 0)
+    reapply = (float(data_in.t_app_re), M_rock_re) if M_rock_re > 0 else None
+
+    [conc_in, K_CEC] = smew.f_CEC_to_conc(f_CEC_in, pH_ic, data_in.soil, conv_mol, conv_Al)
 
     # BUG (L0019/L0020, see LEARNINGS.md): data_in.d_in is already converted
     # um->m in read_input_data (line 384). This re-multiplies by 1e-6, making
@@ -539,7 +564,8 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
     data = smew.biogeochem_balance(
         n, s, L, T, I, v, data_in.k_v, data_in.RAI, data_in.root_d, data_in.Zr, r_het, r_aut, D, temp_soil, 
         data_in.pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, data_in.Si_in, data_in.CaCO3_in, data_in.MgCO3_in, 
-        data_in.M_rock_in, data_in.t_app, data_in.mineral, data_in.rock_f_in, d_in, psd_perc_in, data_in.SSA_in, data_in.diss_f, dt, conv_Al, conv_mol, keyword_add)
+        data_in.M_rock_in, data_in.t_app, data_in.mineral, data_in.rock_f_in, d_in, psd_perc_in, data_in.SSA_in, data_in.diss_f, dt, conv_Al, conv_mol, keyword_add,
+        pH_method=pH_method, reapply=reapply)
 
     # Interpolate zeros during frozen periods
     #
@@ -569,9 +595,14 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
     '''
     Print rock weathering fractions for every year
     '''
+    # Relative to the applied mass: M_rock[0] is 0 when t_app > 0 (rock lands later in the run)
+    applied = np.flatnonzero(np.asarray(data['M_rock']) > 0)
     for i in range(0,int(data_in.n_years)+1):
         idx = np.where(data['t'] == i*365)[0]
-        weathered_fraction = (1-data['M_rock'][idx]/data['M_rock'][0])*100
+        if len(applied) == 0:
+            break
+        idx = np.maximum(idx, applied[0])  # before the application, report the applied state
+        weathered_fraction = (1-data['M_rock'][idx]/data['M_rock'][applied[0]])*100
         print('Weathered fraction in year ',i,':',weathered_fraction,'idx:',idx)
 
     print('Model run finished.')
