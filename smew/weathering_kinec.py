@@ -472,8 +472,8 @@ def Omega_sil(mineral, Ca, Mg, K, Na, Si, H, Al, Fe, K_sp, conv_mol, conv_Al):
         # MINTEQA2 database line gives log K = 3.0180 for the formation direction (components -> solid);
         # dissolution-direction log K used here is the reciprocal, -3.0180, which reproduces a plausible
         # amorphous-silica-glass solubility (~58 mg/L SiO2, between quartz and fresh amorphous silica).
-        # No mineral_weathering() rate law exists for this phase yet (source entry has no kinetic parameters) -
-        # Omega is computed here but a run naming this mineral will still raise ValueError at the rate step.
+        # The MINTEQA2 entry carries no kinetics; mineral_weathering() takes its rate law from
+        # Palandri & Kharaka (2004) Table 6 instead (neutral mechanism only), so this phase runs.
         Omega = min(1, (Si/conv_mol) / 10**(-3.0180))
 
     #elif mineral in ['apatite','muscovite', 'chabazite', 'heulandite', 'clinoptilolite']:
