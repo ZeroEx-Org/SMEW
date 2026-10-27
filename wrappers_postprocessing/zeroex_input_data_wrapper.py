@@ -550,6 +550,18 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
 
     [conc_in, K_CEC] = smew.f_CEC_to_conc(f_CEC_in, pH_ic, data_in.soil, conv_mol, conv_Al)
 
+    # ic_al_cap / ic_al_hold (optional Soil-sheet rows, S1.0): cap the initial dissolved Al at
+    # the phase's solubility. Sheets give f_CEC and derive the water from it, so the default
+    # keeps both and recalibrates K_Ca_Al. "none" in the ic_al_cap row switches the cap off.
+    ic_al_cap = getattr(data_in, 'ic_al_cap', 'Al(OH)3(a)')
+    if not isinstance(ic_al_cap, str):  # an empty cell reads as NaN
+        ic_al_cap = 'Al(OH)3(a)'
+    if ic_al_cap.strip().lower() == 'none':
+        ic_al_cap = None
+    ic_al_hold = getattr(data_in, 'ic_al_hold', 'K_Ca_Al')
+    if not isinstance(ic_al_hold, str):
+        ic_al_hold = 'K_Ca_Al'
+
     # BUG (L0019/L0020, see LEARNINGS.md): data_in.d_in is already converted
     # um->m in read_input_data (line 384). This re-multiplies by 1e-6, making
     # every diameter ~1e6x too small, which inflates the fractal SSA estimate
@@ -565,7 +577,7 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
         n, s, L, T, I, v, data_in.k_v, data_in.RAI, data_in.root_d, data_in.Zr, r_het, r_aut, D, temp_soil, 
         data_in.pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, data_in.Si_in, data_in.CaCO3_in, data_in.MgCO3_in, 
         data_in.M_rock_in, data_in.t_app, data_in.mineral, data_in.rock_f_in, d_in, psd_perc_in, data_in.SSA_in, data_in.diss_f, dt, conv_Al, conv_mol, keyword_add,
-        pH_method=pH_method, reapply=reapply)
+        pH_method=pH_method, reapply=reapply, ic_al_cap=ic_al_cap, ic_al_hold=ic_al_hold)
 
     # Interpolate zeros during frozen periods
     #
