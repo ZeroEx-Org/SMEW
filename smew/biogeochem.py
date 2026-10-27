@@ -1384,11 +1384,16 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # precipitation branch is r*Zr*(1-Omega), linear and unbounded, and
     # Omega_CaCO3 sits close to 1 in exactly the cases that precipitate. The
     # gamma_Ca*gamma_CO3 factor measures 0.17-0.78 across the benchmark suite,
-    # which is enough to move Omega from just above 1 to below it -- so
-    # secondary carbonate precipitation, which fires on five of the seven cases
-    # on concentrations, stops firing on any of them. PHREEQC agrees on the
-    # direction independently: at Example step 29861 SMEW reads Omega = 1.17
-    # where PHREEQC reports SI_calcite = -0.16, i.e. undersaturated.
+    # which is enough to move Omega from just above 1 to below it at a given
+    # state. PHREEQC agrees on the direction independently: at Example step
+    # 29861 SMEW reads Omega = 1.17 where PHREEQC reports SI_calcite = -0.16.
+    #
+    # But that is a post-hoc reading of frozen output, and coupled the effect is
+    # much smaller: precipitating less leaves more Ca and CO3 in solution, which
+    # pushes Omega back up. Measured (tests/golden/F4_shift.txt, % of steps with
+    # W_CaCO3 < 0, gamma off -> on), precipitation shrinks but does not stop:
+    # Example 42.0 -> 33.6, Vulkaneifel raw 28.2 -> 12.1, tePas olivine
+    # 52.2 -> 46.0, Amann 98-99.6 essentially unchanged.
     Omega_CaCO3 = (gam[activity.SP_CA] * Ca) * (gam[activity.SP_CO3] * CO3) / now.K_CaCO3
     Omega_MgCO3 = (gam[activity.SP_MG] * Mg) * (gam[activity.SP_CO3] * CO3) / now.K_MgCO3
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
