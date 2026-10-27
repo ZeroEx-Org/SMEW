@@ -13,3 +13,9 @@ dev.ipynb
 # tests/golden/**/*.npz are NOT ignored -- they are the regression fixtures (the
 # root .gitignore ignores *.npz and re-includes them). Everything else in tests/,
 # including every check_*.py gate, is tracked normally; no `git add -f` needed.
+
+# local-only: S0/S1.0 secondary-precipitation probes and the S1.0 gate
+check_ic_al_cap.py
+probe_s0.py
+probe_s0_analysis.py
+probe_s1_0.py

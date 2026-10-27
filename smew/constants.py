@@ -494,6 +494,32 @@ def K_Al(conv_mol, T_K=None):
     return [10**x * conv_mol for x in step]
 
 #------------------------------------------------------------------------------
+ # Aluminium hydroxide solubility [phreeqc.dat]
+
+# Al(OH)3 + 3H+ = Al+3 + 3H2O: log K at 25 C and delta_h [kcal/mol], as
+# phreeqc.dat carries them (Nordstrom et al. 1990, the same source as the
+# hydrolysis ladder above). The amorphous phase is what precipitates first and is
+# ~10^2.7 more soluble; gibbsite is the stable, slow end.
+_AL_OH3_PHASES = {
+    "Al(OH)3(a)": (10.8, -26.5),
+    "gibbsite": (8.11, -22.8),
+}
+
+
+def log_K_AlOH3(phase, T_K):
+    """log10 K of Al(OH)3 + 3H+ = Al+3 + 3H2O, in ACTIVITIES and mol/l.
+
+    van 't Hoff from phreeqc.dat's delta_h -- phreeqc.dat gives no analytic
+    expression for either phase, so this is exactly what PHREEQC itself does.
+    """
+    if phase not in _AL_OH3_PHASES:
+        raise ValueError(f"Unknown Al(OH)3 phase {phase!r}; "
+                         f"choose from {sorted(_AL_OH3_PHASES)}")
+    logK25, dH = _AL_OH3_PHASES[phase]
+    R = 1.987204e-3                                       # [kcal/mol/K]
+    return logK25 - dH / (R * np.log(10)) * (1 / T_K - 1 / 298.15)
+
+#------------------------------------------------------------------------------
  # carbonate speciation [Stumm and Morgan, 1996]
 
 def K_C(T_K,conv_mol):

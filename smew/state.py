@@ -146,6 +146,17 @@ class SoilParams:
     # every pre-P6 run; "CaCl2" likewise, but on evidence rather than by
     # default; "H2O" subtracts an offset. See _PH_TO_SOLUTION in biogeochem.py.
     pH_method: str = "solution"
+    # S1.0: cap the INITIAL dissolved aluminium at the solubility of this
+    # Al(OH)3 phase ("Al(OH)3(a)" or "gibbsite"; see constants.log_K_AlOH3), and
+    # re-partition the exchanger to match. None, the default, takes conc_in and
+    # f_CEC_in at face value and is bit-identical. See _cap_initial_al.
+    ic_al_cap: object = None
+    # what the cap took out of Al_tot at t = 0 [mol-conv_Al-conv per m2]; 0 when
+    # the cap is off or did not bind. Filled in by _initial_state.
+    ic_al_removed: float = 0.0
+    # S1.0: which input gives when the cap binds -- "totals" or "solution".
+    # See _cap_initial_al. Ignored when ic_al_cap is None.
+    ic_al_hold: str = "totals"
     # A second application of the same feedstock (biogeochem_balance's `reapply`).
     # n_blocks = 1 is the historical single application and is bit-identical. With
     # n_blocks = 2 the diameter classes are doubled: classes [0, n) carry the first

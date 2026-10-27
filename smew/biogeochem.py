@@ -451,7 +451,8 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                     gamma_on=False, gamma_picard=0,
                     mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
-                    mg_phase="magnesite", pH_method="solution", reapply=None):
+                    mg_phase="magnesite", pH_method="solution", reapply=None,
+                    ic_al_cap=None, ic_al_hold="totals"):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -460,6 +461,11 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     """
     has_rock = M_rock_in > 0
     number_min = len(mineral) if has_rock else 1
+    if ic_al_cap is not None:
+        smew.log_K_AlOH3(ic_al_cap, 298.15)     # unknown phase: fail here, not at t = 0
+    if ic_al_hold not in ("totals", "solution", "K_Ca_Al"):
+        raise ValueError("ic_al_hold must be 'totals', 'solution' or 'K_Ca_Al', "
+                         f"got {ic_al_hold!r}")
 
     # second application (see SoilParams.n_blocks)
     n_blocks, tt_app_re = 1, -1
@@ -541,6 +547,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         gamma_on=bool(gamma_on), gamma_picard=int(gamma_picard),
         mu_ref_CEC=float(mu_ref_CEC), mg_phase=str(mg_phase),
         pH_method=str(pH_method),
+        ic_al_cap=ic_al_cap, ic_al_hold=str(ic_al_hold),
         n_blocks=n_blocks, tt_app_re=tt_app_re,
     )
 
@@ -686,6 +693,155 @@ def _validate_psd(d_in, psd_perc_in):
     return d, w
 
 
+def _cap_initial_al(p, f0, H, gam, conc_in, f_CEC_in, den):
+    """S1.0: hold the initial dissolved Al to what an Al(OH)3 phase allows.
+
+    The IC helpers in ic.py (Amann, f_CEC_to_conc, Kelland, ...) derive the
+    dissolved Al from the input exchanger fraction f_Al: free Al3+ from the
+    Gaines-Thomas constant, then Al_w = Al3+ / (free fraction of the hydrolysis
+    ladder). Nothing bounds it, and at pH 7 the free fraction is ~1e-7, so any
+    f_Al above ~1e-5 becomes millimoles per litre of dissolved Al -- Amann
+    starts at 27.6 mmol/l, 10^4-10^5 times gibbsite saturation (S0, vault note
+    "Secondary mineral precipitation" section 5.3). A sink added later would
+    remove that on its first step and be credited for what is really an
+    initial-condition correction. This makes the correction once, at t = 0,
+    where it belongs and where it can be measured on its own.
+
+    What is held, and what gives. The measured pH is held (it is a measurement;
+    H here is already the concentration the pH loop settled on). The TOTAL of
+    each base cation implied by (conc_in, f_CEC_in) is held, so no Ca, Mg, Na or
+    K is created or destroyed. Free Al3+ is set to saturation:
+        a_Al3+ = K(T) * a_H+^3   ->   [Al3+] = K (gamma_H [H])^3 / gamma_Al
+    and the exchanger re-partitions around it under the model's own equations
+    11-15 with the same constants the first step will use, so step 1 starts at
+    equilibrium instead of relaxing off a state its own chemistry rejects. The
+    Al that leaves -- dissolved and exchanged -- is the amount precipitated as
+    the phase at t = 0; it is reported (data["Al_ic_removed"]) rather than
+    carried, since no solid Al pool exists until S1.
+
+    f_Al falls, and the sites it frees go to the base cations and H+. WHERE the
+    base cations come from is p.ic_al_hold, because it depends on what the
+    dataset measured, and one of the two inputs has to give:
+      "totals"   (default) each base cation's total is held; the sites are filled
+                 FROM SOLUTION, so the aqueous concentrations fall. Right when
+                 totals were measured (tePas: total_in + acid saturation). An and
+                 the background inputs, which are scaled from the initial aqueous
+                 composition, fall with them.
+      "solution" the aqueous concentrations are held; the exchanger's base-cation
+                 share grows to fill the sites, so base-cation totals rise. Right
+                 when the solution was measured (Amann: Mg_in; Kelland: conc_in).
+      "K_Ca_Al"  solution AND exchanger held; the literature selectivity K_Ca_Al
+                 gives instead, recalibrated so the input f_Al sits in equilibrium
+                 with saturated Al. Only the dissolved Al changes. Right when
+                 f_Al was measured on an acid soil, where real exchangers hold a
+                 lot of Al against water near Al(OH)3 saturation -- i.e. where
+                 the constant, not the measurement, is the suspect.
+    In the first two the clay's reserve of base cations (R_alk) grows by what
+    f_Al lost, and so Alk_tot rises: with the pH held, sites that cannot be Al
+    are base-cation sites, and that is reserve alkalinity.
+
+    Returns None when the input is already at or below saturation -- the input
+    is left exactly as given -- else a dict with the new conc and f_CEC.
+    """
+    cm, ca = p.conv_mol, p.conv_Al
+    gH, gAl = gam[activity.SP_H], gam[activity.SP_AL]
+    logK = smew.log_K_AlOH3(p.ic_al_cap, f0.T_K)
+    Al_sat = 10 ** logK * (gH * H / cm) ** 3 / gAl * cm * ca    # [mol-conv_Al-conv/l]
+
+    Ca0, Mg0, K0, Na0, Al_w0 = (float(np.ravel(x)[0]) for x in conc_in)
+    Al_free0 = (H ** 4 / den) * Al_w0
+    if not Al_free0 > Al_sat:
+        return None
+    Al_w = Al_sat * den / H ** 4
+
+    # the constants step 1 will use, as concentration quotients
+    (_, _, _, _, _, _, _, K_Mg, K_K, K_Na, K_Al, K_H) = activity.effective_constants(
+        gam, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        p.K_Ca_Mg, p.K_Ca_K, p.K_Ca_Na, p.K_Ca_Al, p.K_Ca_H)
+
+    V = p.n * f0.s * p.Zr * 1000
+    C = p.CEC_tot
+    fCa0, fMg0, fK0, fNa0, fAl0, fH0 = (float(np.ravel(x)[0]) for x in f_CEC_in)
+
+    # A cap removes aluminium; it never adds it. The input pair (Al_w, f_Al)
+    # need not satisfy equation 11 as the model writes it -- ic.py builds it on
+    # the fixed 25 C hydrolysis ladder, the model has used the T-dependent one
+    # since P5b -- so re-solving the exchanger at saturation can put MORE Al on
+    # the clay than the input carried. Then the input's Al, re-equilibrated,
+    # sits below saturation: nothing would precipitate, and relaxing the
+    # partition is step 1's job, not the cap's. Leave the input alone.
+    Al_tot0 = Al_w0 * V + fAl0 / 3 * C * ca
+
+    def _only_removes(out):
+        Al_tot_new = out["conc"][4] * V + out["f_CEC"][4] / 3 * C * ca
+        return out if Al_tot_new < Al_tot0 else None
+    tot = np.array([Ca0 * V + fCa0 / 2 * C, Mg0 * V + fMg0 / 2 * C,
+                    Na0 * V + fNa0 * C, K0 * V + fK0 * C])
+
+    def fractions(Ca, Mg, Na, K, fCa):
+        r = np.sqrt(fCa / Ca)
+        return (fCa, Mg * fCa / (K_Mg * Ca), K * r / np.sqrt(K_K), Na * r / np.sqrt(K_Na),
+                (Al_sat / ca) * r ** 3 / np.sqrt(K_Al), H * r / np.sqrt(K_H))
+
+    def res(y):
+        Ca, Mg, Na, K, fCa = np.exp(y)
+        fCa, fMg, fK, fNa, fAl, fH = fractions(Ca, Mg, Na, K, fCa)
+        return np.array([(Ca * V + fCa / 2 * C) / tot[0] - 1,
+                         (Mg * V + fMg / 2 * C) / tot[1] - 1,
+                         (Na * V + fNa * C) / tot[2] - 1,
+                         (K * V + fK * C) / tot[3] - 1,
+                         fCa + fMg + fK + fNa + fAl + fH - 1])
+
+    if p.ic_al_hold == "K_Ca_Al":
+        # Every measurement held -- solution, exchanger, pH -- and the one
+        # LITERATURE number gives: K_Ca_Al is recalibrated so that equation 11
+        # puts the input f_Al in equilibrium with saturated Al, exactly as
+        # ic.f_CEC_and_conc_to_K calibrates from paired measurements. Only the
+        # dissolved Al changes at t = 0; the new constant holds for the run.
+        out = {"conc": (Ca0, Mg0, K0, Na0, Al_w), "f_CEC": list(f_CEC_in)}
+        if fAl0 > 0:
+            K_eff = (Al_sat / ca) ** 2 * fCa0 ** 3 / (fAl0 ** 2 * Ca0 ** 3)
+            out["K_Ca_Al"] = K_eff * gAl ** 2 / gam[activity.SP_CA] ** 3   # thermodynamic
+        return _only_removes(out)
+
+    if p.ic_al_hold == "solution":
+        # The solution as given; only the exchanger re-partitions. Sum-to-one in
+        # f_Ca alone -- ic.conc_to_f_CEC's own equation, with the capped Al.
+        def res1(z):
+            return np.array([sum(fractions(Ca0, Mg0, Na0, K0, np.exp(z[0]))) - 1])
+        z, info, ier, msg = fsolve(res1, [np.log(fCa0)], full_output=True, xtol=1e-14)
+        if not abs(res1(z)[0]) <= 1e-10:
+            raise RuntimeError("ic_al_cap: exchanger re-partition did not converge "
+                               "(residual %.3g): %s" % (abs(res1(z)[0]), msg))
+        fCa, fMg, fK, fNa, fAl, fH = fractions(Ca0, Mg0, Na0, K0, np.exp(z[0]))
+        return _only_removes({"conc": (Ca0, Mg0, K0, Na0, Al_w),
+                              "f_CEC": [fCa, fMg, fK, fNa, fAl, fH]})
+
+    y0 = np.log([Ca0, Mg0, Na0, K0, fCa0])
+    y, info, ier, msg = fsolve(res, y0, full_output=True, xtol=1e-14)
+    # Judged on the residual, not on ier: at xtol=1e-14 fsolve reports "no
+    # further improvement" on states it has already solved to 1e-16.
+    if not np.max(np.abs(res(y))) <= 1e-10:
+        # Usually not a solver failure but an impossible request: with the pH
+        # and every base-cation total held, the sites f_Al gives up must be
+        # filled from solution, and the solution may simply not hold that much
+        # charge. Say so, with the numbers, rather than blame convergence.
+        have = (2 * Ca0 + 2 * Mg0 + Na0 + K0) * V           # [mol_c-conv]
+        need = fAl0 * C                                      # upper bound
+        raise ValueError(
+            "ic_al_cap=%r with ic_al_hold='totals' has no solution: the exchanger "
+            "gives up up to %.3g mol_c of Al sites, and holding pH and every "
+            "base-cation total, they can only be refilled from solution, which "
+            "holds %.3g mol_c (max residual %.3g). The input exchanger and "
+            "solution cannot both be right here -- use ic_al_hold='solution' or "
+            "'K_Ca_Al'." % (p.ic_al_cap, need / p.conv_mol, have / p.conv_mol,
+                             np.max(np.abs(res(y)))))
+    Ca, Mg, Na, K, fCa = np.exp(y)
+    fCa, fMg, fK, fNa, fAl, fH = fractions(Ca, Mg, Na, K, fCa)
+    return _only_removes({"conc": (Ca, Mg, K, Na, Al_w),
+                          "f_CEC": [fCa, fMg, fK, fNa, fAl, fH]})
+
+
 def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
                    M_rock_in, rock_f_in, d_in, psd_perc_in, SSA_in, t_app,
                    s, T, L, keyword_add):
@@ -730,6 +886,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     # is one.
     pH_sol = pH_in - _PH_TO_SOLUTION[p.pH_method]
     gamma_H_ic = 1.0
+    gam_ic = activity.GAMMA_ONE
+    al_cap = None
     for _pass in range(_IC_PH_MAX_PASSES):
         H = 10 ** (-pH_sol) / gamma_H_ic * p.conv_mol
 
@@ -749,6 +907,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
 
         # cations (mol/l)
         [Ca, Mg, K, Na, Al_w] = conc_in
+        Al_w_in_ic = Al_w
 
         # anions (mol_c/l)
         An = 2 * Mg + 2 * Ca + Na + K - Alk                    # [mol_c/l]
@@ -764,6 +923,26 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         AlOH2 = (H ** 2 * K1 * K2 / den) * Al_w
         AlOH3 = (H * K1 * K2 * K3 / den) * Al_w
         AlOH4 = Al_w - (Al + AlOH + AlOH2 + AlOH3)
+        f_CEC = f_CEC_in
+
+        # S1.0: dissolved Al that its own solubility cannot hold
+        if p.ic_al_cap is not None:
+            al_cap = _cap_initial_al(p, f0, H, gam_ic, conc_in, f_CEC_in, den)
+            if al_cap is not None and "K_Ca_Al" in al_cap:
+                p = replace(p, K_Ca_Al=al_cap["K_Ca_Al"])
+            if al_cap is not None:
+                Ca, Mg, K, Na, Al_w, f_CEC = al_cap["conc"] + (al_cap["f_CEC"],)
+                Al = (H ** 4 / den) * Al_w
+                AlOH = (H ** 3 * K1 / den) * Al_w
+                AlOH2 = (H ** 2 * K1 * K2 / den) * Al_w
+                AlOH3 = (H * K1 * K2 * K3 / den) * Al_w
+                AlOH4 = Al_w - (Al + AlOH + AlOH2 + AlOH3)
+                An = 2 * Mg + 2 * Ca + Na + K - Alk
+                if An < 0:
+                    raise ValueError(
+                        "Not enough cations for this alkalinity after capping the "
+                        "initial Al (ic_al_cap=%r): the exchanger took up %.3g of "
+                        "the base cations' solution charge" % (p.ic_al_cap, -An))
 
         if not p.gamma_on:
             break
@@ -771,7 +950,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         mu_ic = activity.ionic_strength(Ca, Mg, Na, K, H, OH_ic, HCO3, CO3, An,
                                         Al, AlOH, AlOH2, AlOH4,
                                         p.conv_mol, p.conv_Al)
-        _g = activity.gammas(mu_ic, f0.T_K)[activity.SP_H]
+        gam_ic = activity.gammas(mu_ic, f0.T_K)
+        _g = gam_ic[activity.SP_H]
         if abs(_g - gamma_H_ic) <= _IC_PH_RTOL * _g:
             break                       # the state in hand is consistent with _g
         gamma_H_ic = _g
@@ -799,7 +979,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         I_An = I_Ca = I_Mg = I_K = I_Na = I_Si = 0
 
     # CEC adsorbed species
-    [f_Ca, f_Mg, f_K, f_Na, f_Al, f_H] = f_CEC_in
+    [f_Ca, f_Mg, f_K, f_Na, f_Al, f_H] = f_CEC
 
     # reserve of alkalinity
     R_alk = (f_Mg + f_Ca + f_Na + f_K) * p.CEC_tot         # [mol_c]
@@ -957,6 +1137,10 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         clip_M_min=np.zeros(p.number_min),
         clip_psd=0.0,
     )
+    if al_cap is not None:
+        p = replace(p, ic_al_removed=(Al_w_in_ic * p.n * p.Zr * f0.s * 1000
+                                      + (f_CEC_in[4] / 3) * p.CEC_tot * p.conv_Al
+                                      - Al_tot))
     return state, p, applied
 
 
@@ -1938,7 +2122,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals"):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -1988,7 +2172,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                         M_rock_in, t_app, d_in, dt, diss_f, conv_mol, conv_Al,
                         gamma_on=gamma_on, gamma_picard=gamma_picard,
                         mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase,
-                        pH_method=pH_method, reapply=reapply)
+                        pH_method=pH_method, reapply=reapply,
+                        ic_al_cap=ic_al_cap, ic_al_hold=ic_al_hold)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -2183,6 +2368,13 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         "Al": out["Al"], "AlOH": out["AlOH"], "AlOH2": out["AlOH2"],
         "AlOH3": out["AlOH3"], "AlOH4": out["AlOH4"], "Al_w": out["Al_w"],
         "Al_tot": out["Al_tot"], "f_Al": out["f_Al"],
+        # S1.0: Al the initial-condition cap took out at t = 0 (0 when off).
+        # Outside the output contract on purpose: a scalar about the input, not
+        # a series, and the golden masters compare the contract.
+        "Al_ic_removed": p.ic_al_removed,
+        # the K_Ca_Al the run used (thermodynamic when gamma_on); differs from
+        # the input only under ic_al_hold="K_Ca_Al"
+        "K_Ca_Al_used": p.K_Ca_Al,
         # --- F4 activities ---
         # mu is ionic strength [mol/l]; gamma_H is the H+ activity coefficient,
         # which is exactly the activity-vs-concentration pH offset. Every other

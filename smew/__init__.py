@@ -15,6 +15,7 @@ from smew.constants import (
     min_const,
     K_GT_CEC,
     K_Al,
+    log_K_AlOH3,
     K_C,
     MM
 )
