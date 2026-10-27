@@ -35,4 +35,20 @@ docs/
 *.jpeg
 
 # -- dev and test folder --
-tests/
+# tests/ is tracked; its scratch files are listed in tests/.gitignore
+tests/s0_out/
+
+# --- project case studies ---
+# Committed: scripts, notebooks, data sheets. Never committed: field data and
+# model outputs. Each project keeps them in these two folders.
+Projects/*/Field_data/
+Projects/*/runs/
+*.pkl
+*.npz
+!tests/golden/**/*.npz
+# Excel lock files
+~$*
+
+# --- Claude Code ---
+.claude/worktrees/
+.claude/settings.local.json
