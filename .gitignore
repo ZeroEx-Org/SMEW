@@ -52,3 +52,6 @@ Projects/*/runs/
 # --- Claude Code ---
 .claude/worktrees/
 .claude/settings.local.json
+
+# MOMBAK plotting / field-vs-model comparison scripts: local only
+Projects/MOMBAK/*.py
