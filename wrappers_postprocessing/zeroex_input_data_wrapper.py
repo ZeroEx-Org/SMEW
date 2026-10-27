@@ -579,13 +579,19 @@ def run_SMEW(project_name, input_data, interpolate_frozen=True, seed=None,
 
     return data
 
-def create_plots(project_name, model_results, value_col=None):
+def create_plots(project_name, model_results, value_col=None, out_dir=None, title_suffix=None):
     """Draw the standard output figure set.
 
     value_col : the field/column being modelled, used in the figure title.
         Defaults to whatever read_input_data recorded and run_SMEW carried
         through, so callers normally do not need to pass it; pass it
         explicitly to override, or for results produced before that existed.
+    out_dir : directory the figures are written to. None keeps the historical
+        Projects/<project_name>/ (overwriting the tracked out*.png there); the
+        batch wrapper passes one directory per run so runs don't overwrite
+        each other.
+    title_suffix : extra text appended to the figure title (e.g. the batch
+        run's parameter values).
     """
     print('--------------------------------------------------------------------------------------')
     print('Plotting outputs for',project_name,'...')
@@ -594,7 +600,8 @@ def create_plots(project_name, model_results, value_col=None):
         value_col = model_results.get('value_col')
 
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    project_path = repo_root / 'Projects' / project_name
+    project_path = repo_root / 'Projects' / project_name if out_dir is None else pathlib.Path(out_dir)
+    project_path.mkdir(parents=True, exist_ok=True)
 
     _apply_style()
 
@@ -646,6 +653,8 @@ def create_plots(project_name, model_results, value_col=None):
     title = f'Project: {project_name}'
     if value_col:
         title = f'{title} – {value_col}'
+    if title_suffix:
+        title = f'{title} – {title_suffix}'
     fig.suptitle(title, fontsize=14, fontweight='bold', color=INK, y=0.998)
     plt.tight_layout(pad=0.4, h_pad=1.6, rect=[0, 0, 1, 0.982])
     plt.savefig(project_path / 'out.png', dpi=300, facecolor=SURFACE)
