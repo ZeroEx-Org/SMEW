@@ -19,6 +19,7 @@ from smew.constants import (
     sec_phase,
     sec_log_K,
     sec_k,
+    sec_k_ppt,
     K_C,
     MM
 )

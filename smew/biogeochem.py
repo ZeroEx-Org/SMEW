@@ -13,7 +13,7 @@ from smew import activity, weathering_kinec
 from smew.state import (SoilParams, SoilState, StepForcing,
                         STATE_1D, STATE_MIN, STATE_PSD, STATE_SEC)
 from numba import njit
-from scipy.optimize import fsolve, least_squares, root
+from scipy.optimize import brentq, fsolve, least_squares, root
 #minimize, least_squares, newton_krylov, broyden1, root, broyden2
 
 # --- the carbonate charge balance, solved directly -------------------------
@@ -482,11 +482,6 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
     for j, name in enumerate(sec_phases):
         ph = smew.sec_phase(name)
         sec_st[j] = ph["st"]
-        # The limiter is closed-form for a phase that holds ONE element. Two
-        # (kaolinite: Al and Si) is S2's coupled limiter, not a silent guess.
-        if np.count_nonzero(sec_st[j]) != 1:
-            raise NotImplementedError(
-                f"{name}: the S1 limiter handles single-element phases only")
         A_seed[j] = float(sec_A_seed.get(name, ph["A_seed"]))
         if not A_seed[j] >= 0:
             raise ValueError(f"sec_A_seed for {name} must be >= 0, got {A_seed[j]}")
@@ -1214,7 +1209,8 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
     sign convention -- to be applied over the NEXT step.
 
     THE RATE. Transition-state theory, R = s k(T, a_H) A (1 - Omega), the same
-    form in both directions. s because the model scales every mineral surface
+    form in both directions -- unless the phase carries its own growth law
+    (kaolinite: R = -s k_ppt A ln Omega, Yang & Steefel 2008). s because the model scales every mineral surface
     by wetness (silicates, carbonates); A [m2 per m2 of ground] is growth on
     what has formed, floored by a nucleation surface:
         A = max(A_seed Zr, SSA MM M_sec)
@@ -1268,37 +1264,53 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
     w = (Ca, Mg, K, Na, Al / Al_free_frac if Al_free_frac > 0 else 0.0, Si, p.Fe)
     unit = (1.0, 1.0, 1.0, 1.0, ca, 1.0, 1.0)
     removed = np.zeros(7)              # taken out of solution so far [mol-conv]
+    frac = (1.0, 1.0, 1.0, 1.0, Al_free_frac, 1.0, 1.0)  # free / dissolved total
     for j, name in enumerate(p.sec_phases):
         ph = smew.sec_phase(name)
         st = p.sec_st[j]
-        c = int(np.flatnonzero(st)[0])                   # the one element
-        nu = st[c]
+        els = np.flatnonzero(st)
         logK = smew.sec_log_K(name, T_K)
-        if a[c] > 0:
-            Omega[j] = 10 ** (nu * np.log10(a[c]) - ph["nu_H"] * np.log10(a_H) - logK)
-        # dissolved total at saturation: free activity from K, then back to the
-        # dissolved total through the activity coefficient and, for Al, the
-        # hydrolysis ladder's free fraction
-        a_sat = (10 ** logK * a_H ** ph["nu_H"]) ** (1 / nu)
-        free_sat = a_sat / g[c] * cm * unit[c]
-        w_sat = free_sat / Al_free_frac if c == 4 else free_sat
-        # less what the next step drains anyway: drainage takes Al, drainage
-        # and transpiration take everything else (the balances in _step_once)
-        out_l = (L if c == 4 else L + T) * 1000 * p.dt_run      # [l per m2]
-        X = ((w[c] - w_sat) * nZrs - w[c] * out_l) / unit[c] - removed[c]
-        cap_pre = max(X, 0.0) / nu / p.dt_run                # [mol-conv/d] phase
-        sat_dis = max(-X, 0.0) / nu
+        if np.all(a[els] > 0):
+            Omega[j] = 10 ** (np.sum(st[els] * np.log10(a[els]))
+                              - ph["nu_H"] * np.log10(a_H) - logK)
+        # Xp: how much of the PHASE [mol-conv] would bring the water to its
+        # saturation -- positive, precipitable; negative, the deficit a solid
+        # could dissolve into. Net of what the next step drains anyway
+        # (drainage takes Al; drainage and transpiration take the rest, as
+        # the balances in _step_once do) and of what earlier phases took.
+        if len(els) == 1:
+            c = int(els[0])
+            nu = st[c]
+            # closed form: dissolved total at saturation from the free
+            # activity, through the activity coefficient and, for Al, the
+            # hydrolysis ladder's free fraction
+            a_sat = (10 ** logK * a_H ** ph["nu_H"]) ** (1 / nu)
+            free_sat = a_sat / g[c] * cm * unit[c]
+            w_sat = free_sat / Al_free_frac if c == 4 else free_sat
+            out_l = (L if c == 4 else L + T) * 1000 * p.dt_run      # [l per m2]
+            X = ((w[c] - w_sat) * nZrs - w[c] * out_l) / unit[c] - removed[c]
+            Xp = X / nu
+        else:
+            Xp = _sec_extent(st, els, ph["nu_H"], logK, a_H, g, frac, w, unit,
+                             removed, nZrs, L, T, cm, M_sec[j], p.dt_run)
+        cap_pre = max(Xp, 0.0) / p.dt_run                    # [mol-conv/d] phase
+        sat_dis = max(-Xp, 0.0)
         cap_dis = min(sat_dis, M_sec[j]) / p.dt_run
         # what bound a dissolution: 1 saturation, 2 the solid running out
         why_dis = 1.0 if sat_dis <= M_sec[j] else 2.0
         if ph["kin"] is None:
-            W[j] = cap_dis if X < 0 else -cap_pre
+            W[j] = cap_dis if Xp < 0 else -cap_pre
             if W[j] != 0.0:
-                lim[j] = why_dis if X < 0 else 1.0
+                lim[j] = why_dis if Xp < 0 else 1.0
         else:
-            k = smew.sec_k(name, T_K, a_H) * 86400 * cm      # [mol-conv/m2/d]
             A = max(p.sec_A_seed[j] * p.Zr, ph["SSA"] * ph["MM"] * M_sec[j] / cm)
-            R = s * k * A * (1 - Omega[j])
+            k_ppt = smew.sec_k_ppt(name, T_K)
+            if Omega[j] > 1 and k_ppt is not None:
+                # growth by its own law (kaolinite: Yang & Steefel 2008 eq. 9)
+                R = -s * k_ppt * 86400 * cm * A * np.log(Omega[j])
+            else:
+                k = smew.sec_k(name, T_K, a_H) * 86400 * cm  # [mol-conv/m2/d]
+                R = s * k * A * (1 - Omega[j])
             if R < -cap_pre:
                 R, lim[j] = -cap_pre, 1.0
             elif R > cap_dis and M_sec[j] > 0:
@@ -1306,8 +1318,51 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
             elif R > 0 and M_sec[j] == 0:
                 R = 0.0                  # nothing to dissolve: not a limit
             W[j] = R
-        removed[c] -= W[j] * p.dt_run * nu
+        for c in els:
+            removed[c] -= W[j] * p.dt_run * st[c]
     return Omega, W, lim
+
+
+def _sec_extent(st, els, nu_H, logK, a_H, g, frac, w, unit, removed, nZrs, L, T,
+                cm, M_sol, dt_run):
+    """S2: the limiter for a phase that holds more than one element.
+
+    Precipitating xi moles of kaolinite takes 2 xi Al AND 2 xi Si, so no
+    single element's excess says how far is too far. Instead solve
+        log Omega(xi) = sum_c nu_c log a_c(xi) - nu_H log a_H - log K = 0,
+    with each element's dissolved pool reduced by nu_c xi. log Omega falls
+    monotonically in xi, so a bracketed root is exact, and the same sign
+    conventions as the closed form hold: xi > 0 precipitable, xi < 0 the
+    deficit a solid could dissolve into (bracket stopped at the solid present).
+    At fixed pH and free fraction, as the closed form also assumes.
+    """
+    # dissolved amount per element left for this phase [mol-conv]
+    D = {}
+    for c in els:
+        out_l = (L if c == 4 else L + T) * 1000 * dt_run
+        D[c] = (w[c] * nZrs - w[c] * out_l) / unit[c] - removed[c]
+
+    def logO(xi):
+        tot = -nu_H * np.log10(a_H) - logK
+        for c in els:
+            amt = D[c] - st[c] * xi
+            if amt <= 0:
+                return -np.inf
+            # activity: dissolved amount -> concentration -> free -> activity;
+            # the model's unit factors (conv_Al for Al) cancel
+            tot += st[c] * np.log10(g[c] * frac[c] * amt / (nZrs * cm))
+        return tot
+
+    hi = min(D[c] / st[c] for c in els)                   # all of one element gone
+    f0 = logO(0.0)
+    if f0 > 0:
+        return brentq(logO, 0.0, hi * (1 - 1e-12), xtol=1e-14 * max(hi, 1e-300),
+                      rtol=1e-12) if hi > 0 else 0.0
+    if not M_sol > 0:
+        return 0.0
+    if logO(-M_sol) <= 0:
+        return -M_sol                       # all the solid fits under saturation
+    return brentq(logO, -M_sol, 0.0, xtol=1e-14 * M_sol, rtol=1e-12)
 
 
 def _step_once(state, params, now, prev, dt, post_application=True,

@@ -542,6 +542,10 @@ def log_K_AlOH3(phase, T_K):
 #             what PHREEQC does when the database gives no analytic -- or
 #             ("an", A1, A2, A3): log K = A1 + A2*T + A3/T, phreeqc.dat's own
 #             analytic expression, which PHREEQC prefers when present
+#   ppt       optional precipitation law, when growth is NOT the reverse of
+#             dissolution: ("lnOmega", k_ref [mol/m2/s], T_ref [K], E [kJ/mol]),
+#             R = k(T) A ln(Omega) for Omega > 1. Absent: the TST form below
+#             runs both ways
 #   kin       None: an EQUILIBRIUM phase. It relaxes to saturation in one step,
 #             limited only by the solid present on the way down. Otherwise
 #             Palandri and Kharaka (2004) mechanisms, each (log k25 [mol/m2/s],
@@ -587,6 +591,31 @@ _SEC_PHASES = {
         # constant is this one divided by K
         kin={"neutral": (-12.23, 74.5, 0.0)},
         MM=60.084, SSA=100.0, A_seed=1.0e3),
+    # S2. Takes Al AND Si: the first two-element phase (biogeochem._sec_extent).
+    # log K: phreeqc.dat = WATEQ4F #46 (7.435, dH -35.3 kcal), Nordstrom et al.
+    # 1990. Yang & Steefel 2008 (GCA 72, 99-116, doi:10.1016/j.gca.2007.10.011)
+    # measured 10^7.57 at 22 C; this gives 7.70 there.
+    # kin: P&K 2004 Table 29 (clay group), regressed there from Carroll & Walther
+    # 1990, Ganor et al. 1995, Huertas et al. 1999a,b, Nagy et al. 1991, Soong
+    # 1993. At 22 C, pH 4 it gives ~10^-13.2 mol/m2/s, against Yang & Steefel's
+    # measured TST dissolution constant 1.15e-13.
+    # PRECIPITATION is not the reverse of that. Nagy et al. 1991 (Am. J. Sci.
+    # 291, 649-686, doi:10.2475/ajs.291.7.649) found it reversible at 80 C on
+    # pre-activated seed; Yang & Steefel, at 22 C, only for ~110 h, after which
+    # long-term growth followed their eq. 9, R_ppt = 8.0e-15 (dG/RT) mol/m2/s,
+    # linear in ln(Omega), fitted over dG = 4.5-14.8 kJ/mol at pH ~4 (full text,
+    # OSTI author manuscript 923297). At the Omega ~ 1e5 a soil reaches, the TST
+    # form would be ~1e5 times faster than that, so it is eq. 9 that is used.
+    # Its temperature dependence was not measured: P&K's neutral-mechanism E
+    # (22.2 kJ/mol) is ASSUMED, from Yang & Steefel's 22 C.
+    "kaolinite": dict(
+        st=(0, 0, 0, 0, 2, 2, 0), nu_H=6,
+        log_K=("vh", 7.435, -35.3),      # phreeqc.dat; WATEQ4F #46, Nordstrom+ 1990
+        kin={"acid": (-11.31, 65.9, 0.777), "neutral": (-13.18, 22.2, 0.0),
+             "base": (-17.05, 17.9, -0.472)},
+        ppt=("lnOmega", 8.0e-15, 295.15, 22.2),
+        # SSA: ASSUMED, a typical soil kaolinite order of magnitude
+        MM=258.16, SSA=15.0, A_seed=1.0e3),
 }
 
 
@@ -605,6 +634,17 @@ def sec_log_K(name, T_K):
         return lk[1] + lk[2] * T_K + lk[3] / T_K
     R = 1.987204e-3                                       # [kcal/mol/K]
     return lk[1] - lk[2] / (R * np.log(10)) * (1 / T_K - 1 / 298.15)
+
+
+def sec_k_ppt(name, T_K):
+    """Precipitation rate constant [mol/m2/s] of a phase with its own growth law
+    (the `ppt` row), at T_K; None when growth is the reverse of dissolution."""
+    ppt = sec_phase(name).get("ppt")
+    if ppt is None:
+        return None
+    _, k_ref, T_ref, E = ppt
+    R = 8.314462618e-3                                    # [kJ/mol/K]
+    return k_ref * np.exp(-E / R * (1 / T_K - 1 / T_ref))
 
 
 def sec_k(name, T_K, a_H):
