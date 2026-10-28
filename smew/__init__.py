@@ -20,6 +20,10 @@ from smew.constants import (
     sec_log_K,
     sec_k,
     sec_k_ppt,
+    sec_k_age,
+    Fe3_free_fraction,
+    FE3_SPECIES_Z_A0,
+    FE_PHASES,
     K_C,
     MM
 )

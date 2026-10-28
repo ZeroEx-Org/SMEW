@@ -210,6 +210,25 @@ def gammas(mu, T_K):
     return g
 
 
+def gamma_ion(mu, T_K, z, a0, b0=0.0):
+    """Activity coefficient of one ion outside the species table, by the same
+    extended Debye-Huckel as gammas().
+
+    For the iron ions S3 needs (phreeqc.dat ion sizes: Fe+2 6.0, Fe+3 9.0),
+    which are deliberately NOT in the table: Fe stays out of the ionic strength
+    and the implicit solve, as P3 decided, so adding them to SP_* would change
+    what every other gamma means for nothing. mu <= 0 gives 1, as gammas() does.
+    """
+    if mu <= 0.0 or z == 0:
+        return 1.0
+    A, B = dh_coeffs(T_K)
+    sq = np.sqrt(mu)
+    return 10.0 ** (-A * z * z * sq / (1.0 + B * a0 * sq) + b0 * mu)
+
+
+A0_FE2, A0_FE3 = 6.0, 9.0     # phreeqc.dat -gamma for Fe+2 and Fe+3
+
+
 # ---------------------------------------------------------------------------
 # Effective constants: how activities reach the implicit solve
 # ---------------------------------------------------------------------------

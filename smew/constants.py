@@ -616,7 +616,84 @@ _SEC_PHASES = {
         ppt=("lnOmega", 8.0e-15, 295.15, 22.2),
         # SSA: ASSUMED, a typical soil kaolinite order of magnitude
         MM=258.16, SSA=15.0, A_seed=1.0e3),
+    # S3, fe_mode="oxic" only: released Fe is Fe(III) at once.
+    # Ferrihydrite. log K 4.891 = phreeqc.dat Fe(OH)3(a) = WATEQ4F #112, cited
+    # there to Langmuir 1969 (USGS Prof. Paper 650-B, B180-B183,
+    # doi:10.3133/pp650B); no delta_h in either, so none here. An EQUILIBRIUM
+    # phase: it is what precipitates first, and fast, from oxidising Fe(II).
+    # `ages_to`: it transforms to goethite, first order in the ferrihydrite
+    # left, log10 k = log10 k0 + a pH^b at 25 C [k in 1/h] -- Furcas et al.
+    # 2023 (Environ. Sci. Technol. 57, 16097-16108, doi:10.1021/acs.est.3c05260),
+    # their recommended fit, to the rate constants of Das et al. 2011
+    # (doi:10.1021/es101903y): k0 2.70e-5 1/h, a 9.74e-5, b 4 -- a half-life of
+    # ~600 d at pH 7. Their fit to Schwertmann & Murad 1983
+    # (doi:10.1346/CCMN.1983.0310405) data is ~5x faster there (k0 1.01e-4,
+    # a 1.10e-3, b 3): the spread to report. NO temperature dependence is
+    # applied: Furcas et al. give none, and Schwertmann, Stanjek & Becher 2004
+    # (doi:10.1180/0009855043940145) only that it rises with T, 4-25 C.
+    "Fe(OH)3(a)": dict(
+        st=(0, 0, 0, 0, 0, 0, 1), nu_H=3,
+        log_K=("vh", 4.891, 0.0),
+        kin=None, MM=106.87, SSA=0.0, A_seed=0.0,
+        ages_to=("goethite", 2.70e-5, 9.74e-5, 4)),
+    # Goethite. log K -1.0 +/- 0.8 = phreeqc.dat = WATEQ4F #110, Nordstrom et
+    # al. 1990; delta_h -14.48 kcal from Robie & Waldbaum 1968 (USGS Bull. 1259,
+    # doi:10.3133/b1259). It forms ONLY by ferrihydrite ageing (`from_solution`
+    # False): in soil it grows by that transformation, not from solution, and
+    # P&K's only goethite rate (Table 31, neutral -7.94, from Ruan & Gilkes
+    # 1995) is an acid-dissolution rate that would make it instant. Oxic water
+    # is never undersaturated in it, so it does not dissolve either.
+    "goethite": dict(
+        st=(0, 0, 0, 0, 0, 0, 1), nu_H=3,
+        log_K=("vh", -1.0, -14.48),
+        kin=None, MM=88.85, SSA=0.0, A_seed=0.0, from_solution=False),
 }
+
+FE_PHASES = ("Fe(OH)3(a)", "goethite")
+
+
+def sec_k_age(name, pH):
+    """Ageing rate constant of `name` into its `ages_to` phase [1/d], or None."""
+    age = sec_phase(name).get("ages_to")
+    if age is None:
+        return None
+    _, k0, a, b = age
+    return 10 ** (np.log10(k0) + a * pH ** b) * 24.0
+
+
+# S3: iron(III) hydrolysis, CUMULATIVE Fe+3 + n H2O = Fe(OH)n + n H+, as
+# (log beta at 25 C, delta_h [kcal/mol]). phreeqc.dat; WATEQ4F Table 2 entries
+# 1, 102, 103, 104, all cited there to Nordstrom et al. 1990
+# (doi:10.1021/bk-1990-0416.ch031). van 't Hoff, as PHREEQC does without an
+# analytic expression.
+_FE3_HYDROLYSIS = (
+    (-2.19, 10.4),    # FeOH+2
+    (-5.67, 17.1),    # Fe(OH)2+
+    (-12.56, 24.8),   # Fe(OH)3
+    (-21.6, 31.9),    # Fe(OH)4-
+)
+
+
+def Fe3_free_fraction(a_H, T_K, gam=None):
+    """Fe+3 / dissolved Fe(III), in concentrations, at H+ activity a_H [mol/l].
+
+    gam: activity coefficients (Fe+3, FeOH+2, Fe(OH)2+, Fe(OH)3, Fe(OH)4-), or
+    None for all ones -- the activities-off model. With activities on they
+    matter: at pH 6 the charged FeOH+2 and Fe(OH)2+ carry the iron, and unit
+    coefficients put ferrihydrite's SI 0.3 off PHREEQC's.
+    """
+    g3, g_n = (1.0, (1.0, 1.0, 1.0, 1.0)) if gam is None else (gam[0], gam[1:])
+    R = 1.987204e-3                                       # [kcal/mol/K]
+    free = 1.0 / g3                                       # [Fe+3] per unit a_Fe3
+    tot = free
+    for n, (lb, dH) in enumerate(_FE3_HYDROLYSIS, start=1):
+        beta = 10 ** (lb - dH / (R * np.log(10)) * (1 / T_K - 1 / 298.15))
+        tot += beta / (a_H ** n * g_n[n - 1])
+    return free / tot
+
+
+# charge and phreeqc.dat ion size of the Fe(III) hydroxide species, for gam
+FE3_SPECIES_Z_A0 = ((2, 5.0), (1, 5.4), (0, 0.0), (1, 5.4))
 
 
 def sec_phase(name):

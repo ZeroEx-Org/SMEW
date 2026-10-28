@@ -424,9 +424,14 @@ def _identities(d, i, j):
     own; it is recomputed arithmetically each step. So it gets an exact identity
     check, at step 0 and at every executed step.
     """
+    # S3: under fe_mode="reduced" the Fe pool is Fe+2 and enters the definition
+    # (2 eq per Fe); "tracer"/"oxic" and pre-S3 results carry no Fe charge.
+    fe2 = d.get("fe_mode", "tracer") == "reduced"
+
     def alk_from_cations(k):
-        return (2 * d["Mg_tot"][k] + 2 * d["Ca_tot"][k]
-                + d["Na_tot"][k] + d["K_tot"][k] - d["An_tot"][k])
+        alk = (2 * d["Mg_tot"][k] + 2 * d["Ca_tot"][k]
+               + d["Na_tot"][k] + d["K_tot"][k] - d["An_tot"][k])
+        return alk + 2 * d["Fe_tot"][k] if fe2 else alk
 
     res_run = d["Alk_tot"][i] - alk_from_cations(i)
     res_ic = float(d["Alk_tot"][0] - alk_from_cations(0))

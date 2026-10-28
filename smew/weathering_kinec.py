@@ -355,6 +355,8 @@ def carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3, s, Zr, r_CaCO3, r_MgCO3, tau_
 #------------------------------------------------------------------------------
     
 def Omega_sil(mineral, Ca, Mg, K, Na, Si, H, Al, Fe, K_sp, conv_mol, conv_Al):
+    # Fe: the Fe+2 activity for the Fe end-members [mol-conv/l], or None for the
+    # historical literal 1 (fe_mode "tracer"); see biogeochem._fe2_for_omega.
 
     Al = Al/conv_Al
 
@@ -370,7 +372,10 @@ def Omega_sil(mineral, Ca, Mg, K, Na, Si, H, Al, Fe, K_sp, conv_mol, conv_Al):
         # (SR ("Wollastonite")*0.45)*(SR ("Ferrosilite")*0.275)*(SR ("Enstatite")*0.275)
         Wollastonite45 = ((((Ca/conv_mol)*(Si/conv_mol))/(H/conv_mol)**2)/10**13.7605)*0.45
         #Ferrosilite275 =  ((((Fe/conv_mol)*(Si/conv_mol))/(H/conv_mol)**2)/10**7.4471)*0.275
-        Ferrosilite275 =  (((1*(Si/conv_mol))/(H/conv_mol)**2)/10**7.4471)*0.275 # Removed Fe for now because it is not modeled
+        if Fe is None:   # fe_mode "tracer": the historical literal 1 [mol/l], bit-identical
+            Ferrosilite275 =  (((1*(Si/conv_mol))/(H/conv_mol)**2)/10**7.4471)*0.275 # Removed Fe for now because it is not modeled
+        else:            # S3: the Fe+2 activity fe_mode gives (0 when "oxic")
+            Ferrosilite275 =  ((((Fe/conv_mol)*(Si/conv_mol))/(H/conv_mol)**2)/10**7.4471)*0.275
         Enstatite275 =  ((((Mg/conv_mol)*(Si/conv_mol))/(H/conv_mol)**2)/10**11.3269)*0.275
         Omega = min(1, (Wollastonite45 * Ferrosilite275 * Enstatite275))
 
@@ -454,7 +459,10 @@ def Omega_sil(mineral, Ca, Mg, K, Na, Si, H, Al, Fe, K_sp, conv_mol, conv_Al):
         # SR_Olivine=(SR ("Forsterite")*0.9)*(SR ("Fayalite")*0.1)
         Forsterite90 = ((((Mg/conv_mol)**2*(Si/conv_mol))/((H/conv_mol)**4))/10**27.8626) * 0.9
         #Fayalite10 =  ((((Fe/conv_mol)**2*(Si/conv_mol))/((H/conv_mol)**4))/10**19.113)*0.1 # Fe2SiO4 + 4 H+ = SiO2 + 2 Fe+2 + 2 H2O
-        Fayalite10 =  (((Si/conv_mol)/((H/conv_mol)**4))/10**19.113)*0.1
+        if Fe is None:   # fe_mode "tracer": the historical literal 1 [mol/l], bit-identical
+            Fayalite10 =  (((Si/conv_mol)/((H/conv_mol)**4))/10**19.113)*0.1
+        else:            # S3: the Fe+2 activity fe_mode gives (0 when "oxic")
+            Fayalite10 =  ((((Fe/conv_mol)**2*(Si/conv_mol))/((H/conv_mol)**4))/10**19.113)*0.1
         Omega = min(1, (Forsterite90 * Fayalite10))
 
     elif mineral == 'wollastonite': #CaSiO3;M 117.1 g/mol

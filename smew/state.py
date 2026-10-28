@@ -180,6 +180,13 @@ class SoilParams:
     # the run's timestep [d]. The limiter sizes each step's precipitation for an
     # interval of THIS length; sub-steps are shorter, so they can only take less.
     dt_run: float = 0.0
+    # S3: what the iron released by silicates IS. "tracer" (default) is P3's
+    # mass pool, bit-identical. "oxic": Fe(III) at once -- no alkalinity, a
+    # home in ferrihydrite (sec_phases must hold "Fe(OH)3(a)"). "reduced":
+    # Fe(II) that stays -- +2 eq of alkalinity per Fe, P3's upper bound as a
+    # run. The interval between the two IS the redox uncertainty, until plan
+    # item 4 gives iron a rate instead of a switch.
+    fe_mode: str = "tracer"
 
 
 @dataclass(slots=True)

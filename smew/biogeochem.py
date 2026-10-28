@@ -453,7 +453,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
                     mg_phase="magnesite", pH_method="solution", reapply=None,
                     ic_al_cap=None, ic_al_hold="totals",
-                    sec_phases=(), sec_A_seed=None):
+                    sec_phases=(), sec_A_seed=None, fe_mode="tracer"):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -477,6 +477,18 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         if name not in sec_phases:
             raise ValueError(f"sec_A_seed names {name!r}, which is not in "
                              f"sec_phases {sec_phases}")
+    # S3: what released Fe is
+    if fe_mode not in ("tracer", "oxic", "reduced"):
+        raise ValueError(f"fe_mode must be 'tracer', 'oxic' or 'reduced', got {fe_mode!r}")
+    fe_on = [n for n in sec_phases if n in smew.FE_PHASES]
+    if fe_on and fe_mode != "oxic":
+        raise ValueError(f"{fe_on} are Fe(III) phases: they need fe_mode='oxic' "
+                         f"(got {fe_mode!r})")
+    if fe_mode == "oxic" and "Fe(OH)3(a)" not in sec_phases:
+        raise ValueError("fe_mode='oxic' needs 'Fe(OH)3(a)' in sec_phases: the "
+                         "Fe(III) it makes has nowhere else to go")
+    if "goethite" in sec_phases and "Fe(OH)3(a)" not in sec_phases:
+        raise ValueError("goethite forms only by ferrihydrite ageing: add 'Fe(OH)3(a)'")
     sec_st = np.zeros([len(sec_phases), 7])
     A_seed = np.zeros(len(sec_phases))
     for j, name in enumerate(sec_phases):
@@ -569,7 +581,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         ic_al_cap=ic_al_cap, ic_al_hold=str(ic_al_hold),
         n_blocks=n_blocks, tt_app_re=tt_app_re,
         sec_phases=sec_phases, n_sec=len(sec_phases), sec_st=sec_st,
-        sec_A_seed=A_seed, dt_run=float(dt),
+        sec_A_seed=A_seed, dt_run=float(dt), fe_mode=str(fe_mode),
     )
 
 
@@ -1128,7 +1140,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
             for j in range(0, p.number_min):
                 Omega[j] = weathering_kinec.Omega_sil(
                     p.mineral[j], a_Ca0, a_Mg0, a_K0, a_Na0, Si, a_H0, a_Al0,
-                    p.Fe, p.K_sp[j], p.conv_mol, p.conv_Al)  # [-]
+                    _fe2_for_omega(p, 0.0, mu, f0.T_K), p.K_sp[j], p.conv_mol,
+                    p.conv_Al)  # [-]
                 Wr[j] = f0.s * p.diss_f * weathering_kinec.mineral_weathering(
                     p.mineral[j], f0.T_K, Omega[j], a_H0, a_Al0,
                     p.conv_mol, p.conv_Al)
@@ -1144,7 +1157,7 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
         Omega_sec, W_sec, lim_sec = _secondary(
             p, f0.T_K, f0.s, f0.L, f0.T, gam, H, Ca, Mg, K, Na, Al,
             Al / Al_w if Al_w > 0 else 0.0, Si, M_sec,
-            p.n * p.Zr * f0.s * 1000)
+            p.n * p.Zr * f0.s * 1000, Fe=0.0, mu=mu)
 
     state = SoilState(
         pH=pH, pH_conc=pH_conc, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
@@ -1200,8 +1213,26 @@ def _gammas_for(state, p, T_K, k_w):
     return mu, activity.gammas(mu, T_K)
 
 
+def _fe2_for_omega(p, Fe, mu, T_K):
+    """The Fe+2 activity Omega_sil gets for its Fe end-members (augite's
+    ferrosilite, olivine's fayalite) [mol-conv/l], by fe_mode.
+
+    "tracer": None, which Omega_sil reads as its historical literal 1 --
+    bit-identical, and 1 mol/l, i.e. not a concentration at all.
+    "oxic": 0. Released Fe is Fe(III) at once; Fe+2 is not there.
+    "reduced": the dissolved Fe, which is all Fe+2, times its activity
+    coefficient (phreeqc.dat ion size 6.0).
+    """
+    if p.fe_mode == "tracer":
+        return None
+    if p.fe_mode == "oxic":
+        return 0.0
+    g = activity.gamma_ion(mu, T_K, 2, activity.A0_FE2) if p.gamma_on else 1.0
+    return g * Fe
+
+
 def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_sec,
-               nZrs):
+               nZrs, Fe=0.0, mu=0.0):
     """S1: saturation and rate of every secondary phase, from one solution.
 
     Returns (Omega, W, lim), one entry per phase in p.sec_phases. W is the
@@ -1258,13 +1289,24 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
     # has no aqueous species yet (p.Fe), the same caveat as Omega_sil.
     g = (gam[activity.SP_CA], gam[activity.SP_MG], gam[activity.SP_K],
          gam[activity.SP_NA], gam[activity.SP_AL], 1.0, 1.0)
+    # S3: under fe_mode="oxic" the dissolved Fe pool is Fe(III), and its free
+    # Fe+3 is a tiny, pH-set fraction of it (Fe3_free_fraction, ~1e-9 at pH 7)
+    g_fe, fe_frac = 1.0, 1.0
+    if p.fe_mode == "oxic":
+        g_spec = None
+        if p.gamma_on:
+            g_fe = activity.gamma_ion(mu, T_K, 3, activity.A0_FE3)
+            g_spec = (g_fe,) + tuple(activity.gamma_ion(mu, T_K, z, a0)
+                                     for z, a0 in smew.FE3_SPECIES_Z_A0)
+        fe_frac = smew.Fe3_free_fraction(a_H, T_K, g_spec)
+    g = g[:6] + (g_fe,)
     a = np.array([g[0] * Ca / cm, g[1] * Mg / cm, g[2] * K / cm, g[3] * Na / cm,
-                  g[4] * Al / (cm * ca), Si / cm, p.Fe / cm])
+                  g[4] * Al / (cm * ca), Si / cm, g_fe * fe_frac * Fe / cm])
     # dissolved total per element [model units/l], and model units per mol-conv
-    w = (Ca, Mg, K, Na, Al / Al_free_frac if Al_free_frac > 0 else 0.0, Si, p.Fe)
+    w = (Ca, Mg, K, Na, Al / Al_free_frac if Al_free_frac > 0 else 0.0, Si, Fe)
     unit = (1.0, 1.0, 1.0, 1.0, ca, 1.0, 1.0)
     removed = np.zeros(7)              # taken out of solution so far [mol-conv]
-    frac = (1.0, 1.0, 1.0, 1.0, Al_free_frac, 1.0, 1.0)  # free / dissolved total
+    frac = (1.0, 1.0, 1.0, 1.0, Al_free_frac, 1.0, fe_frac)  # free / dissolved total
     for j, name in enumerate(p.sec_phases):
         ph = smew.sec_phase(name)
         st = p.sec_st[j]
@@ -1286,13 +1328,16 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
             # hydrolysis ladder's free fraction
             a_sat = (10 ** logK * a_H ** ph["nu_H"]) ** (1 / nu)
             free_sat = a_sat / g[c] * cm * unit[c]
-            w_sat = free_sat / Al_free_frac if c == 4 else free_sat
-            out_l = (L if c == 4 else L + T) * 1000 * p.dt_run      # [l per m2]
+            w_sat = free_sat / frac[c] if c in (4, 6) else free_sat
+            # drainage takes Al and Fe; drainage and transpiration the rest
+            out_l = (L if c in (4, 6) else L + T) * 1000 * p.dt_run   # [l per m2]
             X = ((w[c] - w_sat) * nZrs - w[c] * out_l) / unit[c] - removed[c]
             Xp = X / nu
         else:
             Xp = _sec_extent(st, els, ph["nu_H"], logK, a_H, g, frac, w, unit,
                              removed, nZrs, L, T, cm, M_sec[j], p.dt_run)
+        if ph.get("from_solution", True) is False:
+            continue                     # forms only by ageing (goethite): below
         cap_pre = max(Xp, 0.0) / p.dt_run                    # [mol-conv/d] phase
         sat_dis = max(-Xp, 0.0)
         cap_dis = min(sat_dis, M_sec[j]) / p.dt_run
@@ -1320,6 +1365,25 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
             W[j] = R
         for c in els:
             removed[c] -= W[j] * p.dt_run * st[c]
+
+    # S3: ageing, solid to solid (ferrihydrite -> goethite). Dissolution-
+    # reprecipitation is the mechanism, so it is written as exactly that: the
+    # parent dissolves k M and the product precipitates the same amount, in the
+    # same step. The water sees nothing, and every ledger row already covers it.
+    # Capped at what the parent will still hold after its own W this step.
+    if any(smew.sec_phase(n).get("ages_to") for n in p.sec_phases):
+        pH_a = -np.log10(a_H)
+        for j, name in enumerate(p.sec_phases):
+            k_age = smew.sec_k_age(name, pH_a)
+            if k_age is None:
+                continue
+            target = smew.sec_phase(name)["ages_to"][0]
+            if target not in p.sec_phases:
+                continue
+            left = max(M_sec[j] - max(W[j], 0.0) * p.dt_run, 0.0)
+            tr = min(k_age * M_sec[j], left / p.dt_run)       # [mol-conv/d]
+            W[j] += tr
+            W[p.sec_phases.index(target)] -= tr
     return Omega, W, lim
 
 
@@ -1339,7 +1403,7 @@ def _sec_extent(st, els, nu_H, logK, a_H, g, frac, w, unit, removed, nZrs, L, T,
     # dissolved amount per element left for this phase [mol-conv]
     D = {}
     for c in els:
-        out_l = (L if c == 4 else L + T) * 1000 * dt_run
+        out_l = (L if c in (4, 6) else L + T) * 1000 * dt_run
         D[c] = (w[c] * nZrs - w[c] * out_l) / unit[c] - removed[c]
 
     def logO(xi):
@@ -1584,6 +1648,13 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     # formed after they are final. It is a charge balance and may legitimately
     # be negative; it is never clamped.
     Alk_tot = 2 * Mg_tot + 2 * Ca_tot + Na_tot + K_tot - An_tot     # [mol_c]
+    # S3: under fe_mode="reduced" the released Fe stays Fe+2, and Fe+2 leaving a
+    # silicate generates alkalinity exactly as Mg+2 does (P3's upper bound,
+    # now a run). It is held aqueous -- not on the exchanger, not in the ionic
+    # strength -- the tracer's assumption, so this is the bound, not a model of
+    # Fe2+ chemistry. A separate statement: "tracer"/"oxic" are bit-identical.
+    if p.fe_mode == "reduced":
+        Alk_tot = Alk_tot + 2 * Fe_tot
 
     # implicit system.
     #
@@ -1843,7 +1914,7 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         Omega_sec, W_sec, lim_sec = _secondary(
             p, now.T_K, now.s, now.L, now.T, gam, H, Ca, Mg, K, Na, Al,
             Al / Al_w if Al_w > 0 else 0.0,
-            Si, M_sec, nZrs)
+            Si, M_sec, nZrs, Fe=Fe, mu=mu)
 
     # Carbonate weathering
     #
@@ -1907,7 +1978,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         a_Al = gam[activity.SP_AL] * Al
         for j in range(0, p.number_min):
             Omega[j] = weathering_kinec.Omega_sil(
-                p.mineral[j], a_Ca, a_Mg, a_K, a_Na, Si, a_H, a_Al, p.Fe,
+                p.mineral[j], a_Ca, a_Mg, a_K, a_Na, Si, a_H, a_Al,
+                _fe2_for_omega(p, Fe, mu, now.T_K),
                 p.K_sp[j], p.conv_mol, p.conv_Al)          # [-]
             Wr[j] = now.s * p.diss_f * weathering_kinec.mineral_weathering(
                 p.mineral[j], now.T_K, Omega[j], a_H, a_Al,
@@ -2349,7 +2421,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals", sec_phases=(), sec_A_seed=None):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals", sec_phases=(), sec_A_seed=None, fe_mode="tracer"):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -2409,7 +2481,8 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                         mu_ref_CEC=mu_ref_CEC, mg_phase=mg_phase,
                         pH_method=pH_method, reapply=reapply,
                         ic_al_cap=ic_al_cap, ic_al_hold=ic_al_hold,
-                        sec_phases=sec_phases, sec_A_seed=sec_A_seed)
+                        sec_phases=sec_phases, sec_A_seed=sec_A_seed,
+                        fe_mode=fe_mode)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -2618,7 +2691,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         # masters compare the contract, and a phase-off run must stay
         # bit-identical in it. W_sec < 0 is precipitation, applied over the
         # step AFTER the index it is stored at (the W_CaCO3 convention).
-        "sec_phases": p.sec_phases, "sec_st": p.sec_st,
+        "sec_phases": p.sec_phases, "sec_st": p.sec_st, "fe_mode": p.fe_mode,
         "M_sec": out["M_sec"], "W_sec": out["W_sec"],
         "Omega_sec": out["Omega_sec"], "clip_sec": out["clip_sec"],
         "lim_sec": out["lim_sec"],
