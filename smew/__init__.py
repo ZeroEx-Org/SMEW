@@ -24,6 +24,7 @@ from smew.constants import (
     Fe3_free_fraction,
     FE3_SPECIES_Z_A0,
     FE_PHASES,
+    CARB_PHASES,
     K_C,
     MM
 )

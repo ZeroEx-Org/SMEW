@@ -546,6 +546,11 @@ def log_K_AlOH3(phase, T_K):
 #             dissolution: ("lnOmega", k_ref [mol/m2/s], T_ref [K], E [kJ/mol]),
 #             R = k(T) A ln(Omega) for Omega > 1. Absent: the TST form below
 #             runs both ways
+#   CO3       carbonate ions per formula unit (S4). Omega gains a_CO3^CO3;
+#             the limiter re-solves the carbonate system (_sec_extent_carb)
+#   grows     False: never precipitates from solution at soil temperature
+#             (kinetic inhibition), but dissolves what is there -- an initial
+#             inventory, sec_M0. Absent: True
 #   kin       None: an EQUILIBRIUM phase. It relaxes to saturation in one step,
 #             limited only by the solid present on the way down. Otherwise
 #             Palandri and Kharaka (2004) mechanisms, each (log k25 [mol/m2/s],
@@ -629,8 +634,11 @@ _SEC_PHASES = {
     # ~600 d at pH 7. Their fit to Schwertmann & Murad 1983
     # (doi:10.1346/CCMN.1983.0310405) data is ~5x faster there (k0 1.01e-4,
     # a 1.10e-3, b 3): the spread to report. NO temperature dependence is
-    # applied: Furcas et al. give none, and Schwertmann, Stanjek & Becher 2004
-    # (doi:10.1180/0009855043940145) only that it rises with T, 4-25 C.
+    # applied -- the 25 C rate is used at every temperature, by decision
+    # (2026-10-28; vault "to add later"): Furcas et al. give none, Schwertmann,
+    # Stanjek & Becher 2004 (doi:10.1180/0009855043940145) only that it rises
+    # with T over 4-25 C, and Das et al. 2011's Arrhenius fit is unread. Cold
+    # soils therefore age ferrihydrite somewhat too fast.
     "Fe(OH)3(a)": dict(
         st=(0, 0, 0, 0, 0, 0, 1), nu_H=3,
         log_K=("vh", 4.891, 0.0),
@@ -647,7 +655,59 @@ _SEC_PHASES = {
         st=(0, 0, 0, 0, 0, 0, 1), nu_H=3,
         log_K=("vh", -1.0, -14.48),
         kin=None, MM=88.85, SSA=0.0, A_seed=0.0, from_solution=False),
+    # ---- S4: carbonates on the same machinery (carb_scheme="sec") ----------
+    # Calcite. log K: Plummer & Busenberg 1982 (GCA 46, 1011-1040,
+    # doi:10.1016/0016-7037(82)90056-4), the analytic form phreeqc.dat and
+    # WATEQ4F #12 carry (-8.48 +/- 0.02 at 25 C) -- the same expression the
+    # legacy scheme has used since P5. kin: P&K 2004 Table 33 (from Plummer et
+    # al. 1978 and Talman et al. 1990), acid / neutral / carbonate (order 1 in
+    # P(CO2)). Plummer et al.'s rate law is reversible, so it runs both ways.
+    # SSA of the precipitate: ASSUMED.
+    "calcite": dict(
+        st=(1, 0, 0, 0, 0, 0, 0), nu_H=0, CO3=1,
+        log_K=("an", -171.9065, -0.077993, 2839.319, 71.595),
+        kin={"acid": (-0.30, 14.4, 1.0), "neutral": (-5.81, 23.5, 0.0),
+             "carbonate": (-3.48, 35.4, 1.0)},
+        MM=100.09, SSA=1.0, A_seed=1.0e3),
+    # Nesquehonite, MgCO3.3H2O -- the Mg carbonate that actually forms in soil
+    # water (magnesite does not, below ~100 C). log K -5.27 +/- 0.15 at 25 C and
+    # dH_r -17.17 kJ/mol: Harrison, Mavromatis, Oelkers & Benezeth 2019 (Chem.
+    # Geol. 504, 123-135, doi:10.1016/j.chemgeo.2018.11.003), MEASURED from 5 to
+    # 35 C (-5.03, -5.27, -5.34), their Table 3. The databases spread a full
+    # log unit around it: MINTEQA2 v4 -4.67, pitzer.dat -5.167, llnl.dat -5.33
+    # (from its HCO3- form), MINTEQA2 v3 = WATEQ4F #149 -5.621 (NBS TN 270; the
+    # legacy mg_phase="nesquehonite" value). No precipitation rate law exists
+    # at 25 C -- only nucleation induction times -- so it is an EQUILIBRIUM
+    # phase: an upper bound on how fast it forms. Harrison et al. also saw it
+    # turn to dypingite within 57 d at 25 C; dypingite is not modelled.
+    "nesquehonite": dict(
+        st=(0, 1, 0, 0, 0, 0, 0), nu_H=0, CO3=1,
+        log_K=("vh", -5.27, -17.17 / 4.184),
+        kin=None, MM=138.36, SSA=0.0, A_seed=0.0),
+    # Magnesite. log K -8.029, WATEQ4F #10 (Langmuir 1969) = MINTEQA2 v3; dH
+    # -6.169 kcal (Robie & Waldbaum 1968). [The legacy scheme's -7.46 is
+    # MINTEQA2 v4's value.] Does not grow below ~100 C; dissolves an initial
+    # inventory at P&K Table 33's rates (Chou et al. 1989, Pokrovsky & Schott
+    # 1999; calcite's E assigned there).
+    "magnesite": dict(
+        st=(0, 1, 0, 0, 0, 0, 0), nu_H=0, CO3=1,
+        log_K=("vh", -8.029, -6.169),
+        kin={"acid": (-6.38, 14.4, 1.0), "neutral": (-9.34, 23.5, 0.0),
+             "carbonate": (-5.22, 62.8, 1.0)},
+        MM=84.31, SSA=1.0, A_seed=0.0, grows=False),
+    # Dolomite, disordered (sedimentary; dolomitic lime). log K -16.54, dH
+    # -11.09 kcal: WATEQ4F #11, Nordstrom et al. 1990. Does not grow at soil T
+    # (the "dolomite problem"); dissolves at P&K Table 33's sedimentary-dolomite
+    # rates (from Busenberg & Plummer 1982).
+    "dolomite": dict(
+        st=(1, 1, 0, 0, 0, 0, 0), nu_H=0, CO3=2,
+        log_K=("vh", -16.54, -11.09),
+        kin={"acid": (-3.19, 36.1, 0.5), "neutral": (-7.53, 52.2, 0.0),
+             "carbonate": (-5.11, 34.8, 0.5)},
+        MM=184.40, SSA=1.0, A_seed=0.0, grows=False),
 }
+
+CARB_PHASES = ("calcite", "nesquehonite", "magnesite", "dolomite")
 
 FE_PHASES = ("Fe(OH)3(a)", "goethite")
 
@@ -708,7 +768,8 @@ def sec_log_K(name, T_K):
     """log10 K of a secondary phase's dissolution reaction, in activities."""
     lk = sec_phase(name)["log_K"]
     if lk[0] == "an":
-        return lk[1] + lk[2] * T_K + lk[3] / T_K
+        out = lk[1] + lk[2] * T_K + lk[3] / T_K
+        return out + lk[4] * np.log10(T_K) if len(lk) > 4 else out
     R = 1.987204e-3                                       # [kcal/mol/K]
     return lk[1] - lk[2] / (R * np.log(10)) * (1 / T_K - 1 / 298.15)
 
@@ -724,7 +785,7 @@ def sec_k_ppt(name, T_K):
     return k_ref * np.exp(-E / R * (1 / T_K - 1 / T_ref))
 
 
-def sec_k(name, T_K, a_H):
+def sec_k(name, T_K, a_H, pCO2=None):
     """Rate constant [mol/m2/s] at T_K and H+ activity a_H [mol/l].
 
     inf for an equilibrium phase. Each mechanism is Arrhenius from 25 C, as
@@ -735,8 +796,10 @@ def sec_k(name, T_K, a_H):
         return np.inf
     R = 8.314462618e-3                                    # [kJ/mol/K]
     k = 0.0
-    for logk25, E, n_H in kin.values():
-        k += 10 ** logk25 * np.exp(-E / R * (1 / T_K - 1 / 298.15)) * a_H ** n_H
+    for mech, (logk25, E, n) in kin.items():
+        # P&K's carbonate mechanism is order n in P(CO2) [atm], not in H+
+        x = (pCO2 if pCO2 is not None else 0.0) if mech == "carbonate" else a_H
+        k += 10 ** logk25 * np.exp(-E / R * (1 / T_K - 1 / 298.15)) * x ** n
     return k
 
 #------------------------------------------------------------------------------

@@ -453,7 +453,8 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                     mu_ref_CEC=activity.MU_REF_CEC, T_ref_CEC=283.15,
                     mg_phase="magnesite", pH_method="solution", reapply=None,
                     ic_al_cap=None, ic_al_hold="totals",
-                    sec_phases=(), sec_A_seed=None, fe_mode="tracer"):
+                    sec_phases=(), sec_A_seed=None, fe_mode="tracer",
+                    carb_scheme="legacy", sec_M0=None):
     """Every constant the run needs, looked up once.
 
     Previously these were ~30 locals resolved inline in the middle of
@@ -489,12 +490,29 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
                          "Fe(III) it makes has nowhere else to go")
     if "goethite" in sec_phases and "Fe(OH)3(a)" not in sec_phases:
         raise ValueError("goethite forms only by ferrihydrite ageing: add 'Fe(OH)3(a)'")
+    # S4: who handles carbonates
+    if carb_scheme not in ("legacy", "sec"):
+        raise ValueError(f"carb_scheme must be 'legacy' or 'sec', got {carb_scheme!r}")
+    carb_on = [n for n in sec_phases if n in smew.CARB_PHASES]
+    if carb_on and carb_scheme != "sec":
+        raise ValueError(f"{carb_on} are carbonates: with carb_scheme='legacy' carb_W "
+                         f"already handles them -- use carb_scheme='sec'")
+    sec_M0 = dict(sec_M0 or {})
+    for name, m0 in sec_M0.items():
+        if name not in sec_phases:
+            raise ValueError(f"sec_M0 names {name!r}, which is not in sec_phases {sec_phases}")
+        if not m0 >= 0:
+            raise ValueError(f"sec_M0 for {name} must be >= 0, got {m0}")
     sec_st = np.zeros([len(sec_phases), 7])
     A_seed = np.zeros(len(sec_phases))
+    sec_C = np.zeros(len(sec_phases))
+    M0 = np.zeros(len(sec_phases))
     for j, name in enumerate(sec_phases):
         ph = smew.sec_phase(name)
         sec_st[j] = ph["st"]
         A_seed[j] = float(sec_A_seed.get(name, ph["A_seed"]))
+        sec_C[j] = ph.get("CO3", 0)
+        M0[j] = float(sec_M0.get(name, 0.0))
         if not A_seed[j] >= 0:
             raise ValueError(f"sec_A_seed for {name} must be >= 0, got {A_seed[j]}")
 
@@ -582,6 +600,7 @@ def _resolve_params(n, Zr, CEC_tot, k_v, RAI, root_d, K_CEC, mineral,
         n_blocks=n_blocks, tt_app_re=tt_app_re,
         sec_phases=sec_phases, n_sec=len(sec_phases), sec_st=sec_st,
         sec_A_seed=A_seed, dt_run=float(dt), fe_mode=str(fe_mode),
+        carb_scheme=str(carb_scheme), sec_C=sec_C, sec_M0=M0,
     )
 
 
@@ -1039,6 +1058,24 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
 
     # Carbonate minerals (considered as an additional pool)
     CaCO3, MgCO3 = CaCO3_in, MgCO3_in
+    if p.carb_scheme == "sec":
+        # S4: the measured carbonate is the INITIAL INVENTORY of the phases that
+        # now handle it; the legacy pools stay empty. Ca -> calcite; Mg -> the
+        # Mg carbonate listed (magnesite first, as the legacy default is).
+        M0 = p.sec_M0.copy()
+        if CaCO3_in > 0:
+            if "calcite" not in p.sec_phases:
+                raise ValueError("CaCO3_in > 0 with carb_scheme='sec' needs 'calcite' "
+                                 "in sec_phases to hold it")
+            M0[p.sec_phases.index("calcite")] += CaCO3_in
+        if MgCO3_in > 0:
+            mg = [n for n in ("magnesite", "nesquehonite") if n in p.sec_phases]
+            if not mg:
+                raise ValueError("MgCO3_in > 0 with carb_scheme='sec' needs 'magnesite' "
+                                 "or 'nesquehonite' in sec_phases to hold it")
+            M0[p.sec_phases.index(mg[0])] += MgCO3_in
+        p = replace(p, sec_M0=M0)
+        CaCO3 = MgCO3 = 0.0
 
     # --- F4: activities at t = 0 ---------------------------------------------
     #
@@ -1080,6 +1117,8 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
                                      f0.s, p.Zr, p.r_CaCO3, p.r_MgCO3,
                                      p.tau_CaCO3, p.tau_MgCO3)
+    if p.carb_scheme == "sec":
+        W_CaCO3 = W_MgCO3 = 0.0          # S4: carb_W is off
 
     # zero rock geometry, replaced below when there is rock
     nm, nd = p.number_min, p.n_d_cl
@@ -1151,13 +1190,18 @@ def _initial_state(p, f0, pH_in, conc_in, f_CEC_in, Si_in, CaCO3_in, MgCO3_in,
 
     # S1: no secondary solid at t = 0 (no initial inventory yet, plan D2), and
     # the first step's rates from the initial solution
-    M_sec = np.zeros(p.n_sec)
+    M_sec = p.sec_M0.copy() if p.sec_M0 is not None else np.zeros(p.n_sec)
     Omega_sec = W_sec = lim_sec = np.zeros(0)
     if p.n_sec:
+        carb0 = None
+        if np.any(p.sec_C):
+            k1e, k2e, kwe = activity.effective_constants(
+                gam, f0.k1, f0.k2, f0.k_w, 1, 1, 1, 1, 1, 1, 1, 1, 1)[:3]
+            carb0 = (Alk, CO2_w, CO3, k1e, k2e, kwe, CO2_air)
         Omega_sec, W_sec, lim_sec = _secondary(
             p, f0.T_K, f0.s, f0.L, f0.T, gam, H, Ca, Mg, K, Na, Al,
             Al / Al_w if Al_w > 0 else 0.0, Si, M_sec,
-            p.n * p.Zr * f0.s * 1000, Fe=0.0, mu=mu)
+            p.n * p.Zr * f0.s * 1000, Fe=0.0, mu=mu, carb=carb0)
 
     state = SoilState(
         pH=pH, pH_conc=pH_conc, H=H, f_H=f_H, Alk=Alk, Alk_tot=Alk_tot, An=An, An_tot=An_tot,
@@ -1232,7 +1276,7 @@ def _fe2_for_omega(p, Fe, mu, T_K):
 
 
 def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_sec,
-               nZrs, Fe=0.0, mu=0.0):
+               nZrs, Fe=0.0, mu=0.0, carb=None):
     """S1: saturation and rate of every secondary phase, from one solution.
 
     Returns (Omega, W, lim), one entry per phase in p.sec_phases. W is the
@@ -1306,21 +1350,44 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
     w = (Ca, Mg, K, Na, Al / Al_free_frac if Al_free_frac > 0 else 0.0, Si, Fe)
     unit = (1.0, 1.0, 1.0, 1.0, ca, 1.0, 1.0)
     removed = np.zeros(7)              # taken out of solution so far [mol-conv]
+    # S4: the carbonate system, for phases holding CO3 (carb = Alk, CO2_w, CO3,
+    # k1, k2, k_w, CO2_air -- the effective constants the step solved with)
+    removed_C = 0.0                    # carbonate taken out so far [mol-conv]
+    a_CO3 = pCO2 = 0.0
+    if carb is not None:
+        Alk_aq, CO2_w, CO3, k1, k2, k_w, CO2_air = carb
+        g_CO3 = gam[activity.SP_CO3]
+        a_CO3 = g_CO3 * CO3 / cm
+        # soil-gas CO2 as a partial pressure [atm], for P&K's carbonate
+        # mechanism; 22.41 l/mol as constants.CO2_atm converts the other way
+        pCO2 = CO2_air / cm * 22.41
     frac = (1.0, 1.0, 1.0, 1.0, Al_free_frac, 1.0, fe_frac)  # free / dissolved total
     for j, name in enumerate(p.sec_phases):
         ph = smew.sec_phase(name)
         st = p.sec_st[j]
         els = np.flatnonzero(st)
+        nC = p.sec_C[j]
         logK = smew.sec_log_K(name, T_K)
-        if np.all(a[els] > 0):
+        if np.all(a[els] > 0) and (nC == 0 or a_CO3 > 0):
             Omega[j] = 10 ** (np.sum(st[els] * np.log10(a[els]))
+                              + (nC * np.log10(a_CO3) if nC else 0.0)
                               - ph["nu_H"] * np.log10(a_H) - logK)
         # Xp: how much of the PHASE [mol-conv] would bring the water to its
         # saturation -- positive, precipitable; negative, the deficit a solid
         # could dissolve into. Net of what the next step drains anyway
         # (drainage takes Al; drainage and transpiration take the rest, as
         # the balances in _step_once do) and of what earlier phases took.
-        if len(els) == 1:
+        if nC:
+            # S4: precipitating a carbonate takes alkalinity (2 eq per CO3), so
+            # the pH falls and CO3 with it -- a fixed-pH excess would overshoot
+            # (the opposite sign to aluminium, where the fall in pH helps).
+            # So the limiter re-solves the carbonate system for every trial
+            # amount: _sec_extent_carb, with the carbon pool closed.
+            Xp = _sec_extent_carb(st, els, nC, logK, g, w, removed, removed_C,
+                                  nZrs, L, T, cm, M_sec[j], p.dt_run,
+                                  Alk_aq, CO2_w, k1, k2, k_w, g_CO3,
+                                  s, H, CO2_air)
+        elif len(els) == 1:
             c = int(els[0])
             nu = st[c]
             # closed form: dissolved total at saturation from the free
@@ -1338,6 +1405,8 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
                              removed, nZrs, L, T, cm, M_sec[j], p.dt_run)
         if ph.get("from_solution", True) is False:
             continue                     # forms only by ageing (goethite): below
+        if ph.get("grows", True) is False:
+            Xp = min(Xp, 0.0)            # inhibited growth: it can only dissolve
         cap_pre = max(Xp, 0.0) / p.dt_run                    # [mol-conv/d] phase
         sat_dis = max(-Xp, 0.0)
         cap_dis = min(sat_dis, M_sec[j]) / p.dt_run
@@ -1354,9 +1423,11 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
                 # growth by its own law (kaolinite: Yang & Steefel 2008 eq. 9)
                 R = -s * k_ppt * 86400 * cm * A * np.log(Omega[j])
             else:
-                k = smew.sec_k(name, T_K, a_H) * 86400 * cm  # [mol-conv/m2/d]
+                k = smew.sec_k(name, T_K, a_H, pCO2) * 86400 * cm  # [mol-conv/m2/d]
                 R = s * k * A * (1 - Omega[j])
-            if R < -cap_pre:
+            if R < 0 and ph.get("grows", True) is False:
+                R = 0.0                  # supersaturated, but it does not grow
+            elif R < -cap_pre:
                 R, lim[j] = -cap_pre, 1.0
             elif R > cap_dis and M_sec[j] > 0:
                 R, lim[j] = cap_dis, why_dis
@@ -1365,6 +1436,7 @@ def _secondary(p, T_K, s, L, T, gam, H, Ca, Mg, K, Na, Al, Al_free_frac, Si, M_s
             W[j] = R
         for c in els:
             removed[c] -= W[j] * p.dt_run * st[c]
+        removed_C -= W[j] * p.dt_run * nC
 
     # S3: ageing, solid to solid (ferrihydrite -> goethite). Dissolution-
     # reprecipitation is the mechanism, so it is written as exactly that: the
@@ -1426,6 +1498,83 @@ def _sec_extent(st, els, nu_H, logK, a_H, g, frac, w, unit, removed, nZrs, L, T,
         return 0.0
     if logO(-M_sol) <= 0:
         return -M_sol                       # all the solid fits under saturation
+    return brentq(logO, -M_sol, 0.0, xtol=1e-14 * M_sol, rtol=1e-12)
+
+
+def _carb_closed_H(Alk, IC, s, nZr, k1, k2, k_w, k_H, H_guess):
+    """H+ and dissolved CO2 for aqueous alkalinity Alk and total inorganic
+    carbon IC [mol-conv per m2], shared between the water and the soil air
+    exactly as the model's own solve shares it:
+        IC = nZr [ s (CO2_w + HCO3 + CO3) + (1 - s) CO2_w / k_H ].
+    One unknown, ln H, bracketed and solved."""
+    def co2(H):
+        return IC / (nZr * (s * (1 + k1 / H + k1 * k2 / H ** 2) + (1 - s) / k_H))
+
+    def f(lnH):
+        H = np.exp(lnH)
+        c = co2(H)
+        return k1 * c / H + 2 * k1 * k2 * c / H ** 2 + k_w / H - H - Alk
+
+    lo, hi = np.log(H_guess) - 2.0, np.log(H_guess) + 2.0
+    for _ in range(60):
+        if f(lo) > 0 and f(hi) < 0:
+            break
+        lo, hi = lo - 2.0, hi + 2.0
+    H = np.exp(brentq(f, lo, hi, xtol=1e-14, rtol=1e-14))
+    return H, co2(H)
+
+
+def _sec_extent_carb(st, els, nC, logK, g, w, removed, removed_C, nZrs, L, T,
+                     cm, M_sol, dt_run, Alk, CO2_w, k1, k2, k_w, g_CO3,
+                     s_w, H, CO2_air):
+    """S4: the limiter for a carbonate -- how much of it [mol-conv] brings the
+    water to its saturation, with the carbonate system re-solved.
+
+    xi moles of phase take st_c xi of each cation, nC xi of carbon and
+    2 nC xi equivalents of alkalinity. The carbon pool is CLOSED within a step
+    and shared between water and soil air, as in the model's own solve -- so
+    the CO2 that precipitation releases stays and lowers the pH further. (A
+    first version held CO2_w fixed instead, i.e. an open system: it overshot
+    saturation by up to 0.22 log units in both directions.) log Omega falls
+    monotonically in xi, so a bracketed root is exact, as in _sec_extent.
+
+    Conservative on purpose: the exchanger, which hands back Ca and Mg as they
+    fall, is not re-solved, and that would only raise Omega. Returns xi > 0
+    precipitable, xi < 0 the deficit a solid could dissolve into (bracket
+    stopped at the solid present), 0 if neither.
+    """
+    nZr = nZrs / s_w
+    k_H = CO2_w / CO2_air
+    D = {}
+    for c in els:
+        D[c] = (w[c] * nZrs - w[c] * (L + T) * 1000 * dt_run) - removed[c]
+    IC0 = nZr * (s_w * (CO2_w + k1 * CO2_w / H + k1 * k2 * CO2_w / H ** 2)
+                 + (1 - s_w) * CO2_air) - removed_C
+    Alk0 = Alk - 2.0 * removed_C / nZrs
+
+    def logO(xi):
+        tot = -logK
+        for c in els:
+            amt = D[c] - st[c] * xi
+            if amt <= 0:
+                return -np.inf
+            tot += st[c] * np.log10(g[c] * amt / (nZrs * cm))
+        IC = IC0 - nC * xi
+        if IC <= 0:
+            return -np.inf
+        Hx, cx = _carb_closed_H(Alk0 - 2.0 * nC * xi / nZrs, IC, s_w, nZr,
+                                k1, k2, k_w, k_H, H)
+        return tot + nC * np.log10(g_CO3 * k1 * k2 * cx / (Hx * Hx) / cm)
+
+    hi = min([D[c] / st[c] for c in els] + [IC0 / nC])
+    f0 = logO(0.0)
+    if f0 > 0:
+        return brentq(logO, 0.0, hi * (1 - 1e-12), xtol=1e-14 * max(hi, 1e-300),
+                      rtol=1e-12) if hi > 0 else 0.0
+    if not M_sol > 0:
+        return 0.0
+    if logO(-M_sol) <= 0:
+        return -M_sol
     return brentq(logO, -M_sol, 0.0, xtol=1e-14 * M_sol, rtol=1e-12)
 
 
@@ -1575,6 +1724,9 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         Al_tot = Al_tot + sec_src[4] * p.conv_Al * dt
         Si_tot = Si_tot + sec_src[5] * dt
         Fe_tot = Fe_tot + sec_src[6] * dt
+        if np.any(p.sec_C):
+            # S4: a carbonate dissolving returns its carbon to the IC pool
+            IC_tot = IC_tot + (state.W_sec @ p.sec_C) * dt
 
     # --- F2: positivity ------------------------------------------------------
     # Forward Euler with loss terms evaluated at the previous step has no lower
@@ -1914,7 +2066,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
         Omega_sec, W_sec, lim_sec = _secondary(
             p, now.T_K, now.s, now.L, now.T, gam, H, Ca, Mg, K, Na, Al,
             Al / Al_w if Al_w > 0 else 0.0,
-            Si, M_sec, nZrs, Fe=Fe, mu=mu)
+            Si, M_sec, nZrs, Fe=Fe, mu=mu,
+            carb=(Alk, CO2_w, CO3, k1, k2, k_w, CO2_air) if np.any(p.sec_C) else None)
 
     # Carbonate weathering
     #
@@ -1942,6 +2095,8 @@ def _step_once(state, params, now, prev, dt, post_application=True,
     [W_CaCO3, W_MgCO3] = smew.carb_W(CaCO3, MgCO3, Omega_CaCO3, Omega_MgCO3,
                                      now.s, p.Zr, p.r_CaCO3, p.r_MgCO3,
                                      p.tau_CaCO3, p.tau_MgCO3)
+    if p.carb_scheme == "sec":
+        W_CaCO3 = W_MgCO3 = 0.0          # S4: the carbonate phases do this now
 
     # Silicate weathering
     M_min, M_rock, rock_f = state.M_min, state.M_rock, state.rock_f
@@ -2421,7 +2576,7 @@ def step(state, params, now, prev, dt, post_application=True, rock_now=None,
 # The run
 # ---------------------------------------------------------------------------
 
-def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals", sec_phases=(), sec_A_seed=None, fe_mode="tracer"):
+def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, temp_soil, pH_in, conc_in, f_CEC_in, K_CEC, CEC_tot, Si_in, CaCO3_in, MgCO3_in, M_rock_in, t_app, mineral, rock_f_in, d_in, psd_perc_in, SSA_in, diss_f, dt, conv_Al, conv_mol, keyword_add, *, max_substeps=MAX_SUBSTEPS, gamma_on=False, gamma_picard=0, mu_ref_CEC=activity.MU_REF_CEC, mg_phase="magnesite", pH_method="solution", reapply=None, ic_al_cap=None, ic_al_hold="totals", sec_phases=(), sec_A_seed=None, fe_mode="tracer", carb_scheme="legacy", sec_M0=None):
     '''Run the soil biogeochemistry over the whole forcing series.
 
     !!! Fe not modeled !!! -> set to zero to make the model run!!
@@ -2482,7 +2637,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
                         pH_method=pH_method, reapply=reapply,
                         ic_al_cap=ic_al_cap, ic_al_hold=ic_al_hold,
                         sec_phases=sec_phases, sec_A_seed=sec_A_seed,
-                        fe_mode=fe_mode)
+                        fe_mode=fe_mode, carb_scheme=carb_scheme, sec_M0=sec_M0)
 
     # --- forcing derived from the inputs -------------------------------------
     T_K = temp_soil + 273.15
@@ -2692,6 +2847,7 @@ def biogeochem_balance(n, s, L, T, I, v, k_v, RAI, root_d, Zr, r_het, r_aut, D, 
         # bit-identical in it. W_sec < 0 is precipitation, applied over the
         # step AFTER the index it is stored at (the W_CaCO3 convention).
         "sec_phases": p.sec_phases, "sec_st": p.sec_st, "fe_mode": p.fe_mode,
+        "sec_C": p.sec_C, "carb_scheme": p.carb_scheme,
         "M_sec": out["M_sec"], "W_sec": out["W_sec"],
         "Omega_sec": out["Omega_sec"], "clip_sec": out["clip_sec"],
         "lim_sec": out["lim_sec"],

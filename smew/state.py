@@ -187,6 +187,15 @@ class SoilParams:
     # run. The interval between the two IS the redox uncertainty, until plan
     # item 4 gives iron a rate instead of a switch.
     fe_mode: str = "tracer"
+    # S4: who handles carbonates. "legacy" (default) is carb_W -- the Kirk et
+    # al. (2015) empirical rate on the CaCO3/MgCO3 pools -- bit-identical.
+    # "sec": carb_W is off and the carbonate phases in sec_phases (calcite,
+    # nesquehonite, magnesite, dolomite) do it, through the same rate law and
+    # limiter as every other secondary phase; CaCO3_in/MgCO3_in become their
+    # initial inventory.
+    carb_scheme: str = "legacy"
+    sec_C: np.ndarray = None     # (n_sec,) carbonate ions per formula unit
+    sec_M0: np.ndarray = None    # (n_sec,) initial inventory [mol-conv per m2]
 
 
 @dataclass(slots=True)

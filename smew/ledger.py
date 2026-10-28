@@ -360,9 +360,15 @@ def build(data, water=None, oc=None):
     # drying opens air-filled pore space that fills with outside air (carbon in),
     # wetting squeezes that air out at the current soil concentration (carbon
     # out). Signed, so it appears as a negative sink when it is a source.
+    c_src = {}
+    sec_C = np.asarray(d.get("sec_C", np.zeros(0)), dtype=float)
+    if sec_names and np.any(sec_C):
+        # S4: a carbonate phase dissolving returns its carbon (W > 0), one
+        # forming takes it (W < 0) -- the "carbonate" row's job, for carb_W
+        c_src["secondary"] = (sec_C @ W_sec[:, j]) * dt
     el["C"] = _pool(
         d["IC_tot"], i, j,
-        sources={"rain": I[i] * 1000 * d["DIC_rain"][i],
+        sources={**c_src, "rain": I[i] * 1000 * d["DIC_rain"][i],
                  "respiration_het": d["r_het"][j] * dt,
                  "respiration_aut": d["r_aut"][j] * dt,
                  "carbonate": (d["W_CaCO3"][j] + d["W_MgCO3"][j]) * dt,
